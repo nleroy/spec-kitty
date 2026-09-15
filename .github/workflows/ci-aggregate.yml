@@ -8,14 +8,35 @@
 # has no cross-workflow `needs:`), so it consumes the shards' already-uploaded
 # `*-reports` artefacts through a cross-run `actions/download-artifact`
 # (`run-id:` pointed at the triggering run) and never re-runs pytest (FR-007).
-# Coverage basenames are deduped and collisions fail loudly. PR coverage uses
-# only executions retained by the exact CI Modules attempt, including shards
-# carried forward by rerun-failed-jobs, with no cross-run fallback. Its registry and
+# Coverage basenames are deduped and collisions fail loudly. Its registry and
 # diff come from the verified synthetic merge tree (parents must match the
 # source run's immutable tested workflow reference); the trusted default-branch checkout remains
-# in place. Missing source provenance or a current shard fails closed.
-# Automatic non-PR diagnostic runs retain the successful-run stale fallback;
-# manual replay always requires complete evidence retained by its exact source attempt.
+# in place. Missing source provenance fails closed.
+#
+# SELECTION-AWARE STALE-ARTEFACT FALLBACK (mission ci-modules-diff-scoping,
+# Approach C). ci-modules.yml diff-scopes its module matrix: an UNSELECTED
+# (unchanged) module's leaf is SKIPPED, not run, so `current` legitimately
+# lacks its coverage file even on a fully green run. The `collect` job keeps
+# the aggregate WHOLE-TREE (never shrinks its expected 19-module set) by
+# reconciling per module:
+#   * a SELECTED (changed) module missing from `current` -> fails closed,
+#     exactly as before -- it is NEVER served from the fallback run, even
+#     when the fallback has it, so a genuine shard failure on changed code
+#     can never be masked by old green;
+#   * an UNSELECTED (unchanged, provably byte-identical to the fallback
+#     source) module missing from `current` -> backfilled from the most
+#     recent successful "CI Modules" run on the branch (falling back to the
+#     default branch when the PR's own branch has no prior success) --
+#     `diff-cover` only scores the actual diff, which lives entirely in
+#     selected/fresh modules, so backfilling unchanged coverage cannot mask a
+#     regression while keeping whole-tree/Sonar coverage coherent.
+# The discriminator (which modules were SELECTED) is read from the
+# `selected-modules` artifact ci-modules.yml's `generate-matrix` job
+# publishes. Manual `workflow_dispatch` replay downloads neither the fallback
+# run nor that artifact, so it always requires complete evidence retained by
+# its exact source attempt (no backfill at all) -- deliberately, so a
+# hand-triggered re-aggregation never silently substitutes data the operator
+# did not ask for.
 #
 # `mode` (pr|full) is honored in THIS workflow's own fail-fast/`needs`
 # behavior: pr short-circuits the diff-cover gate the moment `collect` cannot
@@ -80,7 +101,7 @@ jobs:
       complete: ${{ steps.reconcile.outputs.complete }}
       missing: ${{ steps.reconcile.outputs.missing }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Prepare exact source registry and diff (data only; trusted checkout stays in place)
         env:
@@ -148,17 +169,35 @@ jobs:
 
       - name: Find the most-recent successful "CI Modules" run (stale-artefact fallback source)
         id: last-success
-        # PR coverage must never borrow a different head's report.
-        if: github.event.workflow_run.event != 'pull_request' && github.event_name != 'workflow_dispatch'
+        # Mission ci-modules-diff-scoping (Approach C): generalized to PR runs
+        # too, now that `current` can legitimately lack a shard because
+        # diff-scoping did not SELECT it (not because it failed). The reconcile
+        # step below is what keeps this safe for PR coverage: it never lets a
+        # SELECTED (changed) module's missing shard resolve from `previous` --
+        # only an UNSELECTED (provably byte-identical to the fallback source)
+        # module may be backfilled. workflow_dispatch manual replay still
+        # requires complete evidence from its exact source attempt (no
+        # fallback at all): mixing a hand-picked prior run into a deliberate
+        # re-aggregation would silently substitute data the operator did not
+        # ask for.
+        if: github.event_name != 'workflow_dispatch'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
         run: |
           set -euo pipefail
           branch="$SOURCE_BRANCH"
           run_id=$(gh run list --repo "${{ github.repository }}" --workflow ci-modules.yml \
             --branch "$branch" --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
+          if [ -z "$run_id" ] && [ "$branch" != "$DEFAULT_BRANCH" ]; then
+            # No prior successful run on the PR's own branch (e.g. its first
+            # push) -- fall back to the default branch's most recent success
+            # so an UNSELECTED (unchanged) module can still be backfilled.
+            run_id=$(gh run list --repo "${{ github.repository }}" --workflow ci-modules.yml \
+              --branch "$DEFAULT_BRANCH" --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
+          fi
           echo "run-id=${run_id}" >> "$GITHUB_OUTPUT"
 
       - name: Download the fallback run's shard artefacts (stale shards only)
@@ -173,129 +212,32 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ steps.last-success.outputs.run-id }}
 
+      - name: Download the triggering run's selected-module set (mission ci-modules-diff-scoping)
+        id: download-selected-modules
+        if: github.event_name != 'workflow_dispatch'
+        continue-on-error: true
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: selected-modules
+          path: out/aggregate/selected
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id || inputs.source_run_id }}
+
       - name: Install PyYAML (registry parsing only, no editable install needed)
         shell: bash
         run: |
           pip install --quiet --disable-pip-version-check --only-binary :all: "pyyaml==6.0.2"
 
-      - name: Reconcile shard artefacts by basename (dedup + stale-artefact fallback; guard collisions + completeness)
+      - name: Reconcile shard artefacts by basename (dedup + selection-aware stale-artefact fallback; guard collisions + completeness)
         id: reconcile
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          import sys
-          from collections import defaultdict
-          from pathlib import Path
-
-          import yaml
-
-          root = Path("out/aggregate")
-          current_dir = root / "current"
-          previous_dir = root / "previous"
-          resolved_dir = root / "coverage"
-          resolved_dir.mkdir(parents=True, exist_ok=True)
-
-          def index_by_basename(base: Path) -> dict[str, list[Path]]:
-              """Map coverage basename -> every source path producing it (raw,
-              pre-dedup — the shape `download-artifact` per-artifact-subfolder
-              layout produces before any dedup runs)."""
-              found: dict[str, list[Path]] = defaultdict(list)
-              if not base.exists():
-                  return found
-              for path in base.rglob("coverage-*.xml"):
-                  found[path.name].append(path)
-              return found
-
-          def expected_basenames(registry_path: Path) -> set[str]:
-              """The EXACT per-shard coverage basenames the module registry
-              expects -- the SAME (tier, module, shard) derivation
-              ci-modules.yml's generate-matrix uses to expand module x
-              shard_count into matrix leaves. This is what makes a shard
-              missing from BOTH the current and fallback runs detectable,
-              instead of silently accepting whatever happened to download.
-
-              The registry read here comes from the TESTED PR merge tree
-              (`out/aggregate/source/`, filled by aggregate_source.py from
-              the immutable merge SHA), NOT from this trusted default-branch
-              checkout -- so every row is validated BEFORE any derived value
-              reaches a step output: an untrusted `module` carrying a
-              newline must never be able to inject `key=value` lines into
-              $GITHUB_OUTPUT and override the completeness re-check."""
-              with open(registry_path, encoding="utf-8") as fh:
-                  registry = yaml.safe_load(fh)
-              row_field = re.compile(r"[A-Za-z0-9._-]+")
-              names: set[str] = set()
-              for row in registry["modules"]:
-                  tier = row["tier"]
-                  module = row["module"]
-                  shard_count = row["shard_count"]
-                  for field_name, value in (("tier", tier), ("module", module)):
-                      if not (isinstance(value, str) and row_field.fullmatch(value)):
-                          print(f"::error::ci-aggregate: registry row has a {field_name} outside [A-Za-z0-9._-]: {value!r} -- untrusted PR-authored registry value refused")
-                          sys.exit(1)
-                  if not isinstance(shard_count, int) or isinstance(shard_count, bool) or shard_count < 1:
-                      print(f"::error::ci-aggregate: registry row has a non-positive/non-integer shard_count: {shard_count!r} -- untrusted PR-authored registry value refused")
-                      sys.exit(1)
-                  for idx in range(1, shard_count + 1):
-                      names.add(f"coverage-{tier}-{module}-shard{idx}-of-{shard_count}.xml")
-              return names
-
-          current = index_by_basename(current_dir)
-          previous = index_by_basename(previous_dir)
-
-          # Guard Invariant 1: a basename produced by >1 source WITHIN THE SAME
-          # run is a naming-contract violation upstream — detect and fail loudly,
-          # never silently drop one shard's data by picking a winner.
-          collisions = {name: paths for name, paths in current.items() if len(paths) > 1}
-          if collisions:
-              for name, paths in sorted(collisions.items()):
-                  print(f"::error::ci-aggregate: basename collision for {name}: {[str(p) for p in paths]}")
-              print(f"::error::ci-aggregate: {len(collisions)} basename collision(s) detected — a collision silently drops a shard's coverage data; refusing to proceed")
-              sys.exit(1)
-
-          expected = expected_basenames(Path("out/aggregate/source/ci-module-registry.yml"))
-
-          stale: list[str] = []
-          missing: list[str] = []
-          for name in sorted(expected):
-              if name in current:
-                  (resolved_dir / name).write_bytes(current[name][0].read_bytes())
-              elif name in previous:
-                  if len(previous[name]) > 1:
-                      print(f"::warning::ci-aggregate: fallback source itself has a collision for {name}, using the first: {[str(p) for p in previous[name]]}")
-                  (resolved_dir / name).write_bytes(previous[name][0].read_bytes())
-                  stale.append(name)
-              else:
-                  missing.append(name)
-
-          complete = not missing
-          resolved_count = len(expected) - len(missing)
-          print(f"ci-aggregate: resolved {resolved_count}/{len(expected)} coverage file(s); {len(stale)} served from the stale-artefact fallback: {stale}")
-
-          summary_path = os.environ.get("GITHUB_OUTPUT")
-          if summary_path:
-              # Delimiter (heredoc) form, never bare `key=value`: the runner's
-              # FileCommandManager assigns outputs line-by-line, so a value
-              # containing a newline would inject additional step outputs.
-              # The registry validation above keeps `missing` newline-free;
-              # the delimiter form also contains ordinary embedded newlines.
-              # Validation remains necessary to exclude delimiter collisions.
-              with open(summary_path, "a", encoding="utf-8") as fh:
-                  fh.write(f"complete<<RECONCILE_EOF\n{'true' if complete else 'false'}\nRECONCILE_EOF\n")
-                  fh.write(f"missing<<RECONCILE_EOF\n{','.join(sorted(missing))}\nRECONCILE_EOF\n")
-
-          if missing:
-              # C-005: a shard absent from BOTH the current and fallback runs
-              # is the cross-run generalization of the same-run collision
-              # above — never silently drop it, fail the job loudly.
-              print(f"::error::ci-aggregate: {len(missing)} registry-expected shard(s) missing from BOTH the current and fallback runs: {sorted(missing)}")
-              print("::error::ci-aggregate: refusing to silently treat this run as complete — see contracts/artefact-naming.md 'Stale-artefact fallback'")
-              sys.exit(1)
-          PY
+          # Selection-aware shard reconciler extracted to a unit-tested
+          # module (#4360-B): require every SELECTED shard fresh in this
+          # run; UNSELECTED shards backfill-if-available, never fatal. The
+          # fail-closed guard still exits non-zero on any missing shard.
+          python3 scripts/ci/reconcile_shards.py
 
       - name: Upload reconciled coverage set
         if: always()
@@ -353,7 +295,7 @@ jobs:
           echo "::error::ci-aggregate: reconciled coverage set is INCOMPLETE (missing: $MISSING_SHARDS) -- refusing to score diff-cover over data missing from both the current and fallback runs (C-005)"
           exit 1
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 0
 
@@ -552,7 +494,7 @@ jobs:
 
       - name: Check out the trusted tree (the analysis configuration lives here)
         if: steps.gate.outputs.run == 'true'
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           # Blame attribution and new-code detection need full history.
           fetch-depth: 0

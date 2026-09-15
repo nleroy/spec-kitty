@@ -78,52 +78,6 @@
       "reason": "Declares 'the sonarcloud job in .github/workflows/ci-quality.yml calls this module'. After the retirement the callers are ci-aggregate.yml's sonar-pr job and sonar.yml. A module docstring naming a deleted caller is a justification describing something no longer true (C-005)."
     },
     {
-      "rule": "tests/_arch_shard_map.py::_ARCH_SHARD_1_FILES",
-      "file": "tests/_arch_shard_map.py",
-      "scope": "_ARCH_SHARD_1_FILES",
-      "subjects": [
-        "retiring-host"
-      ],
-      "form": "docstring-or-comment",
-      "lines": [
-        103
-      ],
-      "dependency": false,
-      "disposition": "none",
-      "reason": "References only the host workflow, which SURVIVES the retirement (the job is removed, the file is not), and does so as a lookup or prose mention rather than as a claim about the file's contents. Nothing it asserts changes."
-    },
-    {
-      "rule": "tests/_arch_shard_map.py::_ARCH_SHARD_2_FILES",
-      "file": "tests/_arch_shard_map.py",
-      "scope": "_ARCH_SHARD_2_FILES",
-      "subjects": [
-        "retiring-host"
-      ],
-      "form": "docstring-or-comment",
-      "lines": [
-        219
-      ],
-      "dependency": false,
-      "disposition": "none",
-      "reason": "References only the host workflow, which SURVIVES the retirement (the job is removed, the file is not), and does so as a lookup or prose mention rather than as a claim about the file's contents. Nothing it asserts changes."
-    },
-    {
-      "rule": "tests/_next_shard_map.py::<module-docstring>",
-      "file": "tests/_next_shard_map.py",
-      "scope": "<module-docstring>",
-      "subjects": [
-        "retiring-host"
-      ],
-      "form": "docstring-or-comment",
-      "lines": [
-        13,
-        17
-      ],
-      "dependency": false,
-      "disposition": "none",
-      "reason": "References only the host workflow, which SURVIVES the retirement (the job is removed, the file is not), and does so as a lookup or prose mention rather than as a claim about the file's contents. Nothing it asserts changes."
-    },
-    {
       "rule": "tests/agent/test_context_validation_unit.py::test_no_context_env_vars_leak_out_of_this_class",
       "file": "tests/agent/test_context_validation_unit.py",
       "scope": "test_no_context_env_vars_leak_out_of_this_class",
@@ -164,11 +118,12 @@
       ],
       "form": "docstring-or-comment",
       "lines": [
-        97,
-        380,
-        382,
-        388,
-        761
+        101,
+        426,
+        428,
+        434,
+        487,
+        887
       ],
       "dependency": true,
       "disposition": "rewrite",
@@ -183,7 +138,7 @@
       ],
       "form": "docstring-or-comment",
       "lines": [
-        124
+        128
       ],
       "dependency": true,
       "disposition": "rewrite",
@@ -198,7 +153,7 @@
       ],
       "form": "docstring-or-comment",
       "lines": [
-        1849
+        2059
       ],
       "dependency": true,
       "disposition": "none",
@@ -383,33 +338,20 @@
         "retiring-job",
         "retiring-step"
       ],
-      "form": "docstring-or-comment",
+      "form": "set-equality",
       "lines": [
-        251,
-        252,
-        265,
-        272,
-        273,
-        1431
+        267,
+        268,
+        281,
+        288,
+        289,
+        1341,
+        1342,
+        1655
       ],
       "dependency": true,
       "disposition": "rewrite",
       "reason": "The WP06 FLIP SEAM banner and the KNOWN_LIVE_DUPLICATES commentary described the dict as 'deliberately NOT empty yet'. Rewritten to record the executed flip: what the single row was, why it went, and where the rule's non-vacuity evidence now lives (the six mutations, four of them against a real workflow file derived from the live tree)."
-    },
-    {
-      "rule": "tests/architectural/test_no_duplicate_suite_execution.py::BLIND_WRAPPER_WORKFLOW",
-      "file": "tests/architectural/test_no_duplicate_suite_execution.py",
-      "scope": "BLIND_WRAPPER_WORKFLOW",
-      "subjects": [
-        "retiring-step"
-      ],
-      "form": "synthetic-fixture",
-      "lines": [
-        571
-      ],
-      "dependency": false,
-      "disposition": "none",
-      "reason": "Synthetic fixture body: the subject literal is INPUT to a parser, not a claim about the live tree. WP04 built these deliberately so the battery's mutations keep a substrate after the retirement; they are unaffected by it."
     },
     {
       "rule": "tests/architectural/test_no_duplicate_suite_execution.py::CI_QUALITY_NAME",
@@ -420,7 +362,7 @@
       ],
       "form": "derived-relation",
       "lines": [
-        131
+        147
       ],
       "dependency": true,
       "disposition": "none",
@@ -435,8 +377,8 @@
       ],
       "form": "synthetic-fixture",
       "lines": [
-        1544,
-        1553
+        1768,
+        1777
       ],
       "dependency": false,
       "disposition": "none",
@@ -451,7 +393,7 @@
       ],
       "form": "derived-relation",
       "lines": [
-        501
+        503
       ],
       "dependency": true,
       "disposition": "none",
@@ -466,8 +408,8 @@
       ],
       "form": "synthetic-fixture",
       "lines": [
-        1514,
-        1524
+        1738,
+        1748
       ],
       "dependency": false,
       "disposition": "none",
@@ -482,7 +424,7 @@
       ],
       "form": "synthetic-fixture",
       "lines": [
-        485
+        487
       ],
       "dependency": false,
       "disposition": "none",
@@ -497,7 +439,7 @@
       ],
       "form": "set-equality",
       "lines": [
-        132
+        148
       ],
       "dependency": true,
       "disposition": "none",
@@ -512,11 +454,26 @@
       ],
       "form": "derived-relation",
       "lines": [
-        134
+        150
       ],
       "dependency": true,
       "disposition": "none",
       "reason": "The invocation form mutation 1 asserted (`make test-fast`). Retires with mutation 1, as above; the make TARGET itself survives as the fast tier's entry point."
+    },
+    {
+      "rule": "tests/architectural/test_no_duplicate_suite_execution.py::SHELL_WRAPPER_WORKFLOW",
+      "file": "tests/architectural/test_no_duplicate_suite_execution.py",
+      "scope": "SHELL_WRAPPER_WORKFLOW",
+      "subjects": [
+        "retiring-step"
+      ],
+      "form": "synthetic-fixture",
+      "lines": [
+        581
+      ],
+      "dependency": false,
+      "disposition": "none",
+      "reason": "Synthetic fixture body: the subject literal is INPUT to a parser, not a claim about the live tree. WP04 built these deliberately so the battery's mutations keep a substrate after the retirement; they are unaffected by it."
     },
     {
       "rule": "tests/architectural/test_no_duplicate_suite_execution.py::real_suite_step_host",
@@ -527,11 +484,26 @@
       ],
       "form": "docstring-or-comment",
       "lines": [
-        708
+        748
       ],
       "dependency": true,
       "disposition": "none",
       "reason": "Derived relation: the mutation host is resolved FROM the live tree, which is why mutations 1-3 keep a real-file substrate after the retirement (re-binding to ci-windows.yml) instead of degrading to fixtures. No literal dependency."
+    },
+    {
+      "rule": "tests/architectural/test_no_duplicate_suite_execution.py::test_faultinjection_shell_dash_c_wrapper_is_resolved",
+      "file": "tests/architectural/test_no_duplicate_suite_execution.py",
+      "scope": "test_faultinjection_shell_dash_c_wrapper_is_resolved",
+      "subjects": [
+        "retiring-step"
+      ],
+      "form": "exact-string",
+      "lines": [
+        1331
+      ],
+      "dependency": true,
+      "disposition": "none",
+      "reason": "Exact-string row over `make test-fast` in the #4367 shell-wrapper fault-injection: the literal is the resolved via-label of the wrapper's fixture payload (the shared fast-tier make target), INPUT to the resolution the test proves -- not a claim about the retired sonarcloud job, which the wrapper never names."
     },
     {
       "rule": "tests/architectural/test_no_duplicate_suite_execution.py::test_mutation2_inlined_suite_command_is_detected",
@@ -542,7 +514,7 @@
       ],
       "form": "docstring-or-comment",
       "lines": [
-        992
+        1032
       ],
       "dependency": true,
       "disposition": "none",
@@ -557,7 +529,7 @@
       ],
       "form": "derived-relation",
       "lines": [
-        914
+        954
       ],
       "dependency": true,
       "disposition": "none",
@@ -766,7 +738,7 @@
       ],
       "form": "docstring-or-comment",
       "lines": [
-        21
+        22
       ],
       "dependency": true,
       "disposition": "rewrite",
@@ -781,7 +753,7 @@
       ],
       "form": "docstring-or-comment",
       "lines": [
-        92
+        93
       ],
       "dependency": true,
       "disposition": "none",
@@ -796,7 +768,7 @@
       ],
       "form": "docstring-or-comment",
       "lines": [
-        263
+        270
       ],
       "dependency": true,
       "disposition": "none",
@@ -812,8 +784,8 @@
       ],
       "form": "docstring-or-comment",
       "lines": [
-        226,
-        232
+        233,
+        239
       ],
       "dependency": true,
       "disposition": "rewrite",
@@ -828,8 +800,8 @@
       ],
       "form": "path-anchored",
       "lines": [
-        296,
-        297
+        303,
+        304
       ],
       "dependency": true,
       "disposition": "none",
@@ -1528,6 +1500,22 @@
       "dependency": false,
       "disposition": "none",
       "reason": "References only the host workflow, which SURVIVES the retirement (the job is removed, the file is not), and does so as a lookup or prose mention rather than as a claim about the file's contents. Nothing it asserts changes."
+    },
+    {
+      "rule": "tests/specify_cli/live_work/test_redaction.py::test_benign_environment_assignment_survives",
+      "file": "tests/specify_cli/live_work/test_redaction.py",
+      "scope": "test_benign_environment_assignment_survives",
+      "subjects": [
+        "retiring-step"
+      ],
+      "form": "exact-string",
+      "lines": [
+        51,
+        52
+      ],
+      "dependency": false,
+      "disposition": "none",
+      "reason": "References only the `make test-fast` target, which survives as a Makefile target and a local developer entry point; what retires is one workflow step's USE of it. The file does not mention the retiring job, so this rule is about the target, not about the job."
     },
     {
       "rule": "tests/specify_cli/next/test_next_invocation_lifecycle_seam.py::<module>",

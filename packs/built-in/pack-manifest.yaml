@@ -200,7 +200,7 @@ constituents:
   kind: directive
   path: directives/029-agent-commit-signing-policy.directive.yaml
   provenance_path:
-- content_hash: 3d1bc2ca6b40ec438fe921d094872bcd1fdfc6090f809ca7b51b99a804f2756a
+- content_hash: 67723c0e9e5a23668beb7fe752bd0c0d10cc4f9eff1b57105dba3c398111cba2
   id: DIRECTIVE_030
   kind: directive
   path: directives/030-test-and-typecheck-quality-gate.directive.yaml
@@ -996,7 +996,7 @@ constituents:
   kind: tactic
   path: tactics/architecture/problem-decomposition.tactic.yaml
   provenance_path:
-- content_hash: 7b89c4f6b573d57128f8dbdff2e68f934457191a547b1bb4cb4df67e81c9781e
+- content_hash: 64a7697b41f2bf9cd8f8d3cd5ef81215b2ceb67caa0de9a4ac2f9f618705f963
   id: quality-gate-verification
   kind: tactic
   path: tactics/testing/quality-gate-verification.tactic.yaml
@@ -1360,7 +1360,7 @@ constituents:
 fetched_at:
 generated_at:
 generated_by: spec-kitty doctrine regenerate-graph
-manifest_hash: 2c0d12fc80c6374318793dcb5722f4f01385ccf67b0be79755d25b0ffbe5bd94
+manifest_hash: 7536fd5323e97fce6b7735101b48f9e1449aa7ddf1e025ca8cde5f8736e24cae
 schema_version: '1'
 source_type: built-in
 source_url:

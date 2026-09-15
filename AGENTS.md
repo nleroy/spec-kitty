@@ -565,11 +565,11 @@ edges:
 
 ### Upstream Deferred-Item References
 
-These Priivacy-ai links are upstream references, not work items for this EXPERIMENTAL repository:
+These issues predate the 2026-09-07 org move that made this repository `spec-kitty/spec-kitty`; they were filed against the pre-move upstream line and are closed references, not open work items here:
 
-- [#1622](https://github.com/Priivacy-ai/spec-kitty/issues/1622) (upstream): `coordination.status_service` dead-symbol debt
-- [#1623](https://github.com/Priivacy-ai/spec-kitty/issues/1623) (upstream): `doctor.py` god-module split (FR-012)
-- [#1624](https://github.com/Priivacy-ai/spec-kitty/issues/1624) (upstream): `_tag_source` provenance sidecar typing (FR-013)
+- [#1622](https://github.com/spec-kitty/spec-kitty/issues/1622) (upstream): `coordination.status_service` dead-symbol debt
+- [#1623](https://github.com/spec-kitty/spec-kitty/issues/1623) (upstream): `doctor.py` god-module split (FR-012)
+- [#1624](https://github.com/spec-kitty/spec-kitty/issues/1624) (upstream): `_tag_source` provenance sidecar typing (FR-013)
 
 ---
 
