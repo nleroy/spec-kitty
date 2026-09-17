@@ -811,9 +811,11 @@ _CATEGORY_B_GRANDFATHERED_LEGACY: frozenset[SymbolKey] = frozenset(
         SymbolKey("MigrationDiscoveryError", "541864310809d0a9f476f2963151b6468ced74b86082c66d0e0e3e420cbd133f", source_module="specify_cli.upgrade.migrations"),
         # specify_cli.validators.csv_schema::CSVSchemaValidation
         SymbolKey("CSVSchemaValidation", "9492562d2a8ff78e95fe51a2eb532a7046b2c26e8a04281d800551d07ccb8b9c", source_module="specify_cli.validators.csv_schema"),
-        SymbolKey(
-            "PathValidationResult", "0d1a15a99129e28b1216f120e7a9c73d470b36df5dd1a0907d289e410681356a", source_module="specify_cli.validators.paths"
-        ),  # specify_cli.validators.paths::PathValidationResult -- #811 port added missing_artifact_tokens field, refreshing this content-hash (#470)
+        # specify_cli.validators.paths::PathValidationResult -- #4254 added the
+        # satisfied_by field (the candidate source root that satisfied a build
+        # path), refreshing this content-hash exactly as #811's
+        # missing_artifact_tokens field did (#470)
+        SymbolKey("PathValidationResult", "cdc4bcabb30ad9c1b4db8ac3413d2b0b55b950eb7f08bd2b1b43f94c726b1ca3", source_module="specify_cli.validators.paths"),
         # specify_cli.validators.paths::suggest_directory_creation
         SymbolKey("suggest_directory_creation", "43ab52fd99963aff65a61cac707bfa4e7460fb71e515f636c9e79960290f90f7", source_module="specify_cli.validators.paths"),
         SymbolKey(
@@ -1029,8 +1031,13 @@ _CATEGORY_C_ORG_DOCTRINE_CLOSEOUT: frozenset[SymbolKey] = frozenset(
         # status is unchanged (still no src/ importer -- it is the public return type
         # of ``deactivation_plan()``, consumed by the CLI layer and tests).
         # Prior hash: 527c491b7df6c1369bc3f4c7491626817a5a3a2ede574ffe4527168fde17bf43
+        # Re-pinned 2026-09-16 (#3772): the de-dup consolidation unified this
+        # dataclass's ``not_cascaded_kind_filtered`` field to the kind-bucketed
+        # ``dict[str, list[str]]`` shape its activate-side siblings already
+        # carry -- a body-only change, the symbol's status is unchanged (still
+        # no src/ importer). Prior hash: ea81133908c5385ae013a8057ac7f863386247ba90b64e212b54be895d7e1615
         SymbolKey(
-            "DeactivationPlan", "ea81133908c5385ae013a8057ac7f863386247ba90b64e212b54be895d7e1615", source_module="charter.activation.cascade"
+            "DeactivationPlan", "7969f9715636c68b9fbf15569aa12af1e52f7ba9fc9f4e5b3a697c7274b8364f", source_module="charter.activation.cascade"
         ),  # charter.activation.cascade::DeactivationPlan
         SymbolKey(
             "ReferencedArtifact", "80d3c02ebae2c466ff75be630ecfd259036be62ea0a1394dbab6503f75414afc", source_module="charter.activation.cascade"
@@ -1130,6 +1137,33 @@ _CATEGORY_C_OPERATOR_CONFIG_PUBLIC_API: frozenset[SymbolKey] = frozenset(
 )
 
 
+# ---------- C. mission-type uncaught propagation surface (mission cli-boundary-robustness) ----------
+# ``MissionTypeEmptyActionSequenceError`` (WP06, FR-004) is raised twice
+# intra-module (``resolve_mission_type_context`` / the layered-roster
+# resolver) but, by design, is NEVER caught by name at any src/ call site --
+# ``charter/activation/mission_type_profiles.py::activate.py``'s
+# ``UnknownMissionTypeError`` handler explicitly narrows to that sibling
+# exception ONLY, letting this one propagate uncaught to the CLI boundary
+# (spec.md Edge Cases: "must surface that resolution failure rather than
+# silently treating 'cannot resolve' as 'no steps were removed'" -- see the
+# comment at ``charter/activate.py``'s ``except UnknownMissionTypeError:``
+# block). The gate's import-based caller detector has no way to see a
+# deliberately-uncaught ``raise`` as a reference, same fail-loud shape as
+# ``OperatorEnvFileUnreadableError`` above. Only test code names it (via
+# ``pytest.raises``). Wire-or-prune tracked under #4600 (FR-303).
+
+_CATEGORY_C_MISSION_TYPE_UNCAUGHT_PROPAGATION_SURFACE: frozenset[SymbolKey] = frozenset(
+    {
+        # charter.activation.mission_type_profiles::MissionTypeEmptyActionSequenceError
+        SymbolKey(
+            "MissionTypeEmptyActionSequenceError",
+            "2565e0c8bd07c667a3aa3bec9b8b768a99d1c4e7cc2c0e416e83e5eead3421fe",
+            source_module="charter.activation.mission_type_profiles",
+        ),
+    }
+)
+
+
 # ---------- C. doctor auto-discovery seam (mission operator-config-ergonomics) ----------
 # All six symbols are LIVE, not dead -- the gate only counts cross-file src/
 # ``__all__`` importers, and both reach-paths here are invisible to it:
@@ -1145,20 +1179,35 @@ _CATEGORY_C_OPERATOR_CONFIG_PUBLIC_API: frozenset[SymbolKey] = frozenset(
 
 _CATEGORY_C_DOCTOR_AUTO_DISCOVERY_SEAM: frozenset[SymbolKey] = frozenset(
     {
+        # specify_cli.cli.commands._bytecode_doctor::register
+        SymbolKey("register", "0b36ce302a76619cd22bf8b785376bd02523b558285e18bfa70b5c63dde808ef", source_module="specify_cli.cli.commands._bytecode_doctor"),
+        # specify_cli.cli.commands._bytecode_doctor::run_bytecode_audit
+        SymbolKey(
+            "run_bytecode_audit", "c90c96b3620359b0ec20670b97862f5b2384e9efa10bc4d07f39bf20acea41f2", source_module="specify_cli.cli.commands._bytecode_doctor"
+        ),
         # specify_cli.cli.commands._channel_doctor::register
         SymbolKey("register", "3e40fc6641735900c4b86d367c7daf205425df768e6a63e9be1e789ee6fb3da7", source_module="specify_cli.cli.commands._channel_doctor"),
         # specify_cli.cli.commands._channel_doctor::run_channel_report
         SymbolKey(
             "run_channel_report", "7b85d1bda9aae6c822e97bf6fdcf592fddc365a48710197d103e836fdfd71333", source_module="specify_cli.cli.commands._channel_doctor"
         ),
-        # specify_cli.cli.commands._env_file_doctor::register
-        SymbolKey("register", "f4c52c62e8b8ddfd63c5b1ff0860c75cc9deaceb6b463a7e8fed0416894193af", source_module="specify_cli.cli.commands._env_file_doctor"),
+        # specify_cli.cli.commands._env_file_doctor::register -- body_hash
+        # refreshed (cli-boundary-robustness #4600): the ``register`` shell's
+        # nested ``env_file`` command body changed under the boundary
+        # refactor, invalidating the prior content-tier key. Still reached
+        # only via doctor.py's dynamic ``getattr(module, "register")``
+        # auto-discovery, invisible to the gate's static import scan.
+        SymbolKey("register", "d2dde051e8ad116fa7498dc07207edca65b50b6d4b5bc698997ed8e3106494b2", source_module="specify_cli.cli.commands._env_file_doctor"),
         # specify_cli.cli.commands._env_file_doctor::run_env_file_health
         SymbolKey(
             "run_env_file_health", "a01d73dc1ffe6ecc2db7561a3707c98e425a77aee9b722a8687f0f9601f97fb9", source_module="specify_cli.cli.commands._env_file_doctor"
         ),
-        # specify_cli.cli.commands._provenance_doctor::register
-        SymbolKey("register", "dd9512fa1755c070c893c618c9cbd51d9709e7edf367a0f30653c45649cd6fe3", source_module="specify_cli.cli.commands._provenance_doctor"),
+        # specify_cli.cli.commands._provenance_doctor::register -- body_hash
+        # refreshed (cli-boundary-robustness #4600): the ``register`` shell's
+        # nested ``provenance`` command body changed under the boundary
+        # refactor, invalidating the prior content-tier key. Same
+        # dynamic-dispatch reach path as ``_env_file_doctor::register`` above.
+        SymbolKey("register", "5e4f0244801fa7826875fe6345c9917612a3753b6719ea6f4762130212f1f7eb", source_module="specify_cli.cli.commands._provenance_doctor"),
         # specify_cli.cli.commands._provenance_doctor::run_provenance_audit
         SymbolKey(
             "run_provenance_audit", "a657b0dbc7e8d2b82fc80e005592413230902a240d550c1b12be39cd4cd66b2e", source_module="specify_cli.cli.commands._provenance_doctor"
@@ -2009,18 +2058,13 @@ _CATEGORY_C_LIVE_WORK_CAPTURE_PUBLIC_SURFACE: frozenset[SymbolKey] = frozenset(
         ),
         SymbolKey(
             "FAMILY_BY_EMISSION_KIND",
-            "4ad9da79ebea08a774b554ef62f2908bf05d7f52c2490336544a52d7a56c2394",
+            "1a354ac95982b19d0fbbd32f8d911a1f0e810a570c626a20580ca8b3d90bf544",
             source_module="specify_cli.live_work.kinds",
         ),
         SymbolKey(
             "WORK_CONTRACT_VERSION",
             "f60bd4a8eccc1adf9a46950f8084dfe4a9503f06d349e3cdec7f5a52ec2a9a74",
             source_module="specify_cli.live_work.kinds",
-        ),
-        SymbolKey(
-            "MAX_ATTRS",
-            "847dfdbd099f9b71c5b1aa01d3396a1328ab56afffd91b9d4216397f9199db51",
-            source_module="specify_cli.live_work.publisher",
         ),
         SymbolKey(
             "MAX_OBSERVATIONS_PER_INVOCATION",
@@ -2036,6 +2080,37 @@ _CATEGORY_C_LIVE_WORK_CAPTURE_PUBLIC_SURFACE: frozenset[SymbolKey] = frozenset(
             "MAX_WATCHED_PATHS",
             "4b5def206513a5f888383a0aa5deca4d8f5363913625772c159b3419de76c3ca",
             source_module="specify_cli.live_work.watcher",
+        ),
+    }
+)
+
+
+# ---------- D. Live Work authored-message service surface (#4269) ----------
+# The ``specify_cli.live_work.authored`` service (spec-kitty#4269, authored
+# publish/reply/read/inbox): its runtime callers are the ``zeitgeist
+# send/reply/read/inbox`` CLI commands and the MCP ``zeitgeist_*`` tools,
+# which import the service functions, the typed error and the outcome enum
+# by name. The three symbols below are the service's *result type and wire
+# bounds* — the vocabulary its tests pin and the e2e A-question->B-reply
+# qualification (e2e#452) consumes by name; none has a second src/
+# importer yet. TODO(triage): wire the first by-name consumer or drop from
+# __all__ (FR-303, spec-kitty#4269).
+_CATEGORY_D_LIVE_WORK_AUTHORED_PUBLIC_SURFACE: frozenset[SymbolKey] = frozenset(
+    {
+        SymbolKey(
+            "MAX_BODY_CHARS",
+            "a261b2cb10c71e416e6510b99867f762a39fbea39abffab22e7839b74c5fb76e",
+            source_module="specify_cli.live_work.authored",
+        ),
+        SymbolKey(
+            "MAX_SEND_ATTEMPTS",
+            "ca7665b7b15916df6bab54376f11ab423df60fa7665dc540c8b2bb74d8e23c7e",
+            source_module="specify_cli.live_work.authored",
+        ),
+        SymbolKey(
+            "SendResult",
+            "61611126fce6c3eb3e543ab379e43c7982e82c704a69a0e98bd90ff0d213af32",
+            source_module="specify_cli.live_work.authored",
         ),
     }
 )
@@ -2061,6 +2136,7 @@ _SYMBOL_ALLOWLIST: frozenset[SymbolKey] = (
     | _CATEGORY_C_UPSTREAM_SESSION_PRESENCE
     | _CATEGORY_C_QUALITY_DEBT_1928
     | _CATEGORY_C_OPERATOR_CONFIG_PUBLIC_API
+    | _CATEGORY_C_MISSION_TYPE_UNCAUGHT_PROPAGATION_SURFACE
     | _CATEGORY_C_DOCTOR_AUTO_DISCOVERY_SEAM
     | _CATEGORY_C_BRANCH_NAMING_FAILOVER_SEAM
     | _CATEGORY_C_BACKCOMPAT_SHIM_REEXPORT
@@ -2084,6 +2160,7 @@ _SYMBOL_ALLOWLIST: frozenset[SymbolKey] = (
     | _CATEGORY_E_CHARTER_ACTIVATION_SPLIT_FORWARD_API
     | _CATEGORY_C_TEAM_KITTY_LAUNCH_DEFAULTS_3980
     | _CATEGORY_C_LIVE_WORK_CAPTURE_PUBLIC_SURFACE
+    | _CATEGORY_D_LIVE_WORK_AUTHORED_PUBLIC_SURFACE
 )
 
 

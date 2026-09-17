@@ -154,6 +154,43 @@ def _install_command_skill_agents(project: Path, agents: list[str]) -> bool:
     return complete
 
 
+def _repair_requested_command_skills(project: Path, agents: list[str]) -> bool:
+    """Restore clone-local command skills for explicitly requested agents."""
+    data = YAML(typ="safe").load((project / ".kittify/config.yaml").read_text(encoding="utf-8"))
+    configured_agents = data.get("agents", {}).get("available") if isinstance(data, dict) else None
+    if not isinstance(configured_agents, list):
+        return False
+    command_agents = [agent for agent in agents if agent in _COMMAND_SKILL_AGENTS and agent in configured_agents]
+    if not command_agents:
+        return False
+
+    from specify_cli.skills.command_installer import CANONICAL_COMMANDS
+    from specify_cli.skills.vibe_config import ensure_project_skill_path, skill_path_configured
+
+    skills_root = project / ".agents" / "skills"
+    missing_skills = any(not (skills_root / f"spec-kitty.{command}" / "SKILL.md").is_file() for command in CANONICAL_COMMANDS)
+    # #4433: the vibe pointer is part of vibe's command surface, so an
+    # explicitly requested vibe gets it restored too — surgically, without
+    # re-running the installer over present (possibly user-edited) skills.
+    vibe_pointer_missing = "vibe" in command_agents and not skill_path_configured(project)
+    if not (missing_skills or vibe_pointer_missing):
+        return False
+
+    protected = GitignoreManager(project).protect_all_agents()
+    if not protected.success:
+        raise ValueError("Cannot repair command delivery: " + "; ".join(protected.errors))
+    if missing_skills:
+        _console.print("[yellow]Restoring missing command skills for this initialized clone.[/yellow]")
+        if not _install_command_skill_agents(project, command_agents):
+            raise ValueError("Command-skill repair remains incomplete; resolve the reported collision or error")
+    if vibe_pointer_missing and not skill_path_configured(project):
+        # Reached when the skills were present and only the pointer was lost;
+        # after an installer run the pointer is already restored.
+        _console.print("[yellow]Restoring the missing vibe skill-path pointer for this initialized clone.[/yellow]")
+        ensure_project_skill_path(project)
+    return True
+
+
 def _resume_command_delivery(project: Path) -> bool:
     """Finish only interrupted command delivery; never rewrite saved config."""
     pending = _pending_command_skills(project)
@@ -191,6 +228,7 @@ def _check_initialized_command_skills(project: Path, requested: str | None) -> l
     """Diagnose clone-local delivery gaps without rewriting initialized projects."""
     from specify_cli.skills.command_installer import CANONICAL_COMMANDS
     from specify_cli.skills.paths import skill_path_observations
+    from specify_cli.skills.vibe_config import skill_path_configured
 
     selected = _validated_agent_selection(requested, load_agent_config(project).available)
     if not _COMMAND_SKILL_AGENTS.intersection(selected):
@@ -201,10 +239,19 @@ def _check_initialized_command_skills(project: Path, requested: str | None) -> l
         observations = skill_path_observations(project, path)
         if observations[-1].state.kind != "file" or path.stat().st_size == 0:
             missing.append(command)
-    if missing:
-        raise ValueError(
-            "Configured agent command skills are missing or empty: " + ", ".join(missing) + ". Run: spec-kitty agent config sync --create-missing --keep-orphaned"
-        )
+    # #4433: vibe resolves the shared skills through the gitignored
+    # ``.vibe/config.toml`` ``skill_paths`` pointer — an independently missable
+    # part of the command surface (doctor already diagnoses it), so init's
+    # "Already Initialized" verdict must agree with doctor's on what "ready"
+    # means instead of exiting 0 over a broken vibe surface.
+    vibe_pointer_missing = "vibe" in selected and not skill_path_configured(project)
+    if missing or vibe_pointer_missing:
+        gaps = []
+        if missing:
+            gaps.append("Configured agent command skills are missing or empty: " + ", ".join(missing))
+        if vibe_pointer_missing:
+            gaps.append("the vibe skill-path pointer (.vibe/config.toml skill_paths) is missing")
+        raise ValueError("; ".join(gaps) + ". Run: spec-kitty agent config sync --create-missing --keep-orphaned")
     return selected
 
 
@@ -778,6 +825,26 @@ def init(  # noqa: C901
             _console.print(error_panel)
             raise typer.Exit(1)
 
+    selected_agents_from_option: list[str] | None = None
+    if ai_assistant:
+        raw_agents = [part.strip().lower() for part in ai_assistant.replace(";", ",").split(",") if part.strip()]
+        if not raw_agents:
+            _console.print("[red]Error:[/red] --ai flag did not contain any valid agent identifiers")
+            raise typer.Exit(1)
+        selected_agents_from_option = []
+        seen_agents: set[str] = set()
+        invalid_agents: list[str] = []
+        for key in raw_agents:
+            if key not in AI_CHOICES:
+                invalid_agents.append(key)
+                continue
+            if key not in seen_agents:
+                selected_agents_from_option.append(key)
+                seen_agents.add(key)
+        if invalid_agents:
+            _console.print(f"[red]Error:[/red] Invalid AI assistant(s): {', '.join(invalid_agents)}. Choose from: {', '.join(AI_CHOICES.keys())}")
+            raise typer.Exit(1)
+
     # T004 — Idempotency check: exit 0 cleanly if already initialized.
     # This prevents silent re-init and makes CI-driven init safe to re-run.
     # #4425: a re-run also verifies the requested agents' managed surfaces —
@@ -788,6 +855,8 @@ def init(  # noqa: C901
         try:
             resumed = _resume_command_delivery(project_path)
             if not resumed:
+                if selected_agents_from_option:
+                    _repair_requested_command_skills(project_path, selected_agents_from_option)
                 selected = _check_initialized_command_skills(project_path, ai_assistant)
                 _restore_native_project_skills(project_path, selected)
         except (OSError, ValueError, AgentConfigError) as exc:
@@ -854,23 +923,8 @@ def init(  # noqa: C901
         _console.print("[yellow]ℹ git not detected[/yellow] - install git for version control")
 
     if ai_assistant:
-        raw_agents = [part.strip().lower() for part in ai_assistant.replace(";", ",").split(",") if part.strip()]
-        if not raw_agents:
-            _console.print("[red]Error:[/red] --ai flag did not contain any valid agent identifiers")
-            raise typer.Exit(1)
-        selected_agents: list[str] = []
-        seen_agents: set[str] = set()
-        invalid_agents: list[str] = []
-        for key in raw_agents:
-            if key not in AI_CHOICES:
-                invalid_agents.append(key)
-                continue
-            if key not in seen_agents:
-                selected_agents.append(key)
-                seen_agents.add(key)
-        if invalid_agents:
-            _console.print(f"[red]Error:[/red] Invalid AI assistant(s): {', '.join(invalid_agents)}. Choose from: {', '.join(AI_CHOICES.keys())}")
-            raise typer.Exit(1)
+        assert selected_agents_from_option is not None
+        selected_agents = selected_agents_from_option
     else:
         if non_interactive:
             _console.print("[red]Error:[/red] --ai is required in non-interactive mode")
@@ -1161,6 +1215,7 @@ def init(  # noqa: C901
         "kiro": ".kiro/",
         "pi": ".agents/skills/",
         "letta": ".agents/skills/",
+        "llxprt": ".llxprt/",
     }
 
     notice_entries = []
@@ -1304,7 +1359,18 @@ def init(  # noqa: C901
     # repository yet -- that case keeps relying on the merge-path self-heal.
     from specify_cli.lanes.merge import _ensure_merge_driver_git_config
 
-    _ensure_merge_driver_git_config(project_path)
+    try:
+        _ensure_merge_driver_git_config(project_path)
+    except (OSError, subprocess.CalledProcessError, UnicodeError) as exc:
+        # Git is optional during init. A stale .git entry, missing binary, or
+        # unusable repository must not turn best-effort driver wiring into a
+        # late scaffold failure; merge paths self-heal the config later.
+        _console.print(
+            f"Could not configure Spec Kitty merge drivers; continuing without local git configuration: {exc}",
+            style="yellow",
+            markup=False,
+            soft_wrap=True,
+        )
 
     # Fresh-init provisioning (FR-009/010/011, NFR-004): seed
     # mission_type_activations from the shipped default charter pack so a

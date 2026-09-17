@@ -44,7 +44,9 @@ def _presence(session_ref: str = "a" * 12) -> dict[str, object]:
 
 
 def test_status_end_to_end_over_a_real_loopback_double(state_root: Path, managed_stream_double) -> None:
-    credentials.store(repo="github.com/acme/spec-kitty", relay_url=managed_stream_double.url, token="team-a-cred", token_kind="shared_team")
+    credentials.store(
+        repo="github.com/acme/spec-kitty", relay_url=managed_stream_double.url, token="team-a-cred", session_ref="issuer-reader", token_kind="shared_team"
+    )
     managed_stream_double.push_frame(_frame(seq=1, frame=_presence(session_ref="a" * 12)))
     managed_stream_double.close_stream()
 
@@ -56,8 +58,61 @@ def test_status_end_to_end_over_a_real_loopback_double(state_root: Path, managed
     assert managed_stream_double.received_headers[0].get("X-Zeitgeist-Capability") == "team-a-cred"
 
 
+def test_status_end_to_end_answers_a_quiet_repo_from_the_relay_snapshot(state_root: Path, managed_stream_double) -> None:
+    """#4215 end to end: nothing is ever published on this relay, yet the CLI
+    reports the teammate the relay has on record, says where that came from,
+    and dates the observation."""
+    credentials.store(
+        repo="github.com/acme/spec-kitty", relay_url=managed_stream_double.url, token="team-a-cred", session_ref="issuer-reader", token_kind="shared_team"
+    )
+    managed_stream_double.snapshot_document = {
+        "schema_version": "1.0.0",
+        "epoch": "epoch-1",
+        "seq": 4,
+        "cursor": "epoch-1:4",
+        "observed_at": now_epoch(),
+        "presence": [
+            {
+                "observed_at": now_epoch() - 40,
+                "ttl_s": 60,
+                "expires_in_s": 20.0,
+                "actor": {"session_ref": "d" * 12, "user": "alice"},
+                "path": "src/app.py",
+            }
+        ],
+        "focus": [],
+        "events": [],
+        "coverage": {"history_basis": "empty", "retained_frames": 0, "returned_frames": 0, "follow": False},
+    }
+
+    result = runner.invoke(app, ["status", "github.com/acme/spec-kitty", "--timeout", "2.0"])
+
+    assert result.exit_code == 0
+    assert "d" * 12 in result.stdout
+    assert "the relay's own record of who is live now" in result.stdout
+    assert "observed 40s ago" in result.stdout
+
+
+def test_status_end_to_end_says_a_quiet_listen_is_not_proof_nobody_is_working(state_root: Path, managed_stream_double) -> None:
+    """The honesty half of the same acceptance criterion: on a relay with no
+    snapshot route, an empty result is reported as "nothing was published",
+    never as an empty team."""
+    credentials.store(
+        repo="github.com/acme/spec-kitty", relay_url=managed_stream_double.url, token="team-a-cred", session_ref="issuer-reader", token_kind="shared_team"
+    )
+    managed_stream_double.close_stream()
+
+    result = runner.invoke(app, ["status", "github.com/acme/spec-kitty", "--timeout", "1.0"])
+
+    assert result.exit_code == 0
+    assert "not the same as nobody working" in result.stdout
+    assert "snapshot_route_unavailable" in result.stdout
+
+
 def test_watch_end_to_end_over_a_real_loopback_double(state_root: Path, managed_stream_double) -> None:
-    credentials.store(repo="github.com/acme/spec-kitty", relay_url=managed_stream_double.url, token="team-a-cred", token_kind="shared_team")
+    credentials.store(
+        repo="github.com/acme/spec-kitty", relay_url=managed_stream_double.url, token="team-a-cred", session_ref="issuer-reader", token_kind="shared_team"
+    )
     managed_stream_double.push_frame(_frame(seq=1, frame=_presence(session_ref="b" * 12)))
     managed_stream_double.close_stream()
 
@@ -78,6 +133,7 @@ def test_watch_quiet_repo_returns_one_json_summary_within_timeout(state_root: Pa
         repo="github.com/acme/spec-kitty",
         relay_url=managed_stream_double.url,
         token="team-a-cred",
+        session_ref="issuer-reader",
         token_kind="shared_team",
     )
     result = runner.invoke(
@@ -100,6 +156,7 @@ def test_watch_quiet_repo_summary_arrives_within_window(state_root: Path, manage
         repo="github.com/acme/spec-kitty",
         relay_url=managed_stream_double.url,
         token="team-a-cred",
+        session_ref="issuer-reader",
         token_kind="shared_team",
     )
     started = time.monotonic()
@@ -137,6 +194,7 @@ def test_watch_connection_that_never_establishes_http_fails_within_timeout(
         repo="github.com/acme/spec-kitty",
         relay_url=f"http://127.0.0.1:{port}",
         token="team-a-cred",
+        session_ref="issuer-reader",
         token_kind="shared_team",
     )
     try:
@@ -179,6 +237,7 @@ def test_watch_connection_that_never_establishes_fails_within_window(
         repo="github.com/acme/spec-kitty",
         relay_url=f"http://127.0.0.1:{port}",
         token="team-a-cred",
+        session_ref="issuer-reader",
         token_kind="shared_team",
     )
     started = time.monotonic()
@@ -209,6 +268,7 @@ def test_operability_report_distinguishes_relay_rejections(state_root: Path, tea
         repo="github.com/acme/spec-kitty",
         relay_url=team_kitty_double.url,
         token="team-a-cred",
+        session_ref="issuer-reader",
         token_kind="shared_team",
     )
     team_kitty_double.configure(status=status, body={"detail": detail})
@@ -224,6 +284,7 @@ def test_operability_report_uses_a_supported_presence_canary(state_root: Path, t
         repo="github.com/acme/spec-kitty",
         relay_url=team_kitty_double.url,
         token="team-a-cred",
+        session_ref="issuer-reader",
         token_kind="shared_team",
     )
 
@@ -264,7 +325,9 @@ def test_status_with_no_repo_argument_reads_the_checkout_own_credential(
         tmp_path / "work" / "acme" / "widget",
         "https://github.com/acme/widget.git",
     )
-    credentials.store(repo="github.com/acme/widget", relay_url=managed_stream_double.url, token="team-a-cred", token_kind="shared_team")
+    credentials.store(
+        repo="github.com/acme/widget", relay_url=managed_stream_double.url, token="team-a-cred", session_ref="issuer-reader", token_kind="shared_team"
+    )
     # A leftover live-shaped bearer from before #132, still on disk.
     with credentials.credentials_path().open("a") as fh:
         fh.write('\n["widget"]\nrelay_url = "http://stale.invalid"\ntoken = "stale-bearer"\n')
@@ -301,6 +364,7 @@ def test_watch_end_to_end_delivers_a_status_moment_event_frame(state_root: Path,
         repo="github.com/acme/spec-kitty",
         relay_url=managed_stream_double.url,
         token="team-a-cred",
+        session_ref="issuer-reader",
         token_kind="shared_team",
     )
     managed_stream_double.push_frame(_frame(seq=1, frame=_event()))

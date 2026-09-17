@@ -15,7 +15,7 @@ Learn how to add, remove, and manage AI agents in your spec-kitty project after 
 
 ## Overview
 
-Spec-kitty supports slash-command agents such as Claude Code, Gemini CLI, Cursor, Qwen Code, OpenCode, Windsurf, GitHub Copilot, Kilo Code, Auggie CLI, Kiro CLI, legacy Amazon Q, and Google Antigravity. It also supports command-skill agents such as Codex CLI, Mistral Vibe, Pi, and Letta Code. (Roo Code shut down on 2026-05-15 and is no longer supported.)
+Spec-kitty supports slash-command agents such as Claude Code, Gemini CLI, LLxprt Code, Cursor, Qwen Code, OpenCode, Windsurf, GitHub Copilot, Kilo Code, Auggie CLI, Kiro CLI, legacy Amazon Q, and Google Antigravity. It also supports command-skill agents such as Codex CLI, Mistral Vibe, Pi, and Letta Code. (Roo Code shut down on 2026-05-15 and is no longer supported.)
 
 This guide applies after you've run `spec-kitty init` and want to change which agents are active in your project. For initial setup, see the [Getting Started](../../tutorials/getting-started.md) guide.
 
@@ -85,7 +85,7 @@ Managed command surfaces are created and refreshed by CLI commands. You should n
 
 > **Why This Matters**: In spec-kitty 0.11.x and earlier, users could manually delete agent directories, but migrations would recreate them. Starting in 0.12.0, migrations respect `config.yaml` - if an agent is not listed in `available`, its directory stays deleted. See [Upgrading to 0.12.0](../installation/install-and-upgrade.md) for details.
 
-For architectural details, see [ADR #6: Config-Driven Agent Management](https://github.com/Priivacy-ai/spec-kitty/blob/main/docs/adr/1.x/2026-01-23-6-config-driven-agent-management.md).
+For architectural details, see [ADR #6: Config-Driven Agent Management](https://github.com/spec-kitty/spec-kitty/blob/main/docs/adr/1.x/2026-01-23-6-config-driven-agent-management.md).
 
 ## Listing Agents
 
@@ -181,7 +181,7 @@ Error: Invalid agent keys: cluade
 Valid agent keys:
   claude, codex, gemini, cursor, qwen, opencode,
   windsurf, kilocode, copilot, auggie, q, kiro,
-  antigravity, vibe, pi, letta
+  antigravity, vibe, pi, letta, llxprt
 ```
 
 **Already configured**: If an agent is already configured, it's skipped with a message:
@@ -550,7 +550,7 @@ environment you intentionally manage.
 # Valid agent keys:
 #   claude, codex, gemini, cursor, qwen, opencode,
 #   windsurf, kilocode, copilot, auggie, q, kiro,
-#   antigravity, vibe, pi, letta
+#   antigravity, vibe, pi, letta, llxprt
 
 # Fix typo and retry
 spec-kitty agent config add claude  # Not "cluade"
@@ -565,7 +565,7 @@ If your issue isn't covered here:
 1. Check [Supported AI Agents](../../../api/supported-agents.md) for agent-specific requirements
 2. Review [Configuration Reference](../../../api/configuration.md) for config.yaml schema
 3. Consult [CLI Commands Reference](../../../api/agent-subcommands.md#spec-kitty-agent-config) for detailed command syntax
-4. Report bugs at [spec-kitty GitHub Issues](https://github.com/Priivacy-ai/spec-kitty/issues)
+4. Report bugs at [spec-kitty GitHub Issues](https://github.com/spec-kitty/spec-kitty/issues)
 
 ## See Also
 
@@ -585,7 +585,7 @@ For more information on agent management and related topics:
 
 ### Architecture
 
-- [ADR #6: Config-Driven Agent Management](https://github.com/Priivacy-ai/spec-kitty/blob/main/docs/adr/1.x/2026-01-23-6-config-driven-agent-management.md) - Architectural decision record explaining why migrations now respect `config.yaml` and the config-driven model rationale
+- [ADR #6: Config-Driven Agent Management](https://github.com/spec-kitty/spec-kitty/blob/main/docs/adr/1.x/2026-01-23-6-config-driven-agent-management.md) - Architectural decision record explaining why migrations now respect `config.yaml` and the config-driven model rationale
 
 ### Migration Guides
 

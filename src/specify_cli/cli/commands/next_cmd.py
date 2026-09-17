@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
 from specify_cli.core.context_validation import require_main_repo
 from specify_cli.core.paths import (
+    UnsafePathSegmentError,
     get_main_repo_root,
     locate_project_root,
 )
@@ -66,16 +67,12 @@ def decide_next(
 
     if effective_root is None:
         return _decide_next(agent, mission_slug, result, repo_root)
-    return _decide_next(
-        agent, mission_slug, result, repo_root, effective_root=effective_root
-    )
+    return _decide_next(agent, mission_slug, result, repo_root, effective_root=effective_root)
 
 
 def _runtime_bridge_module():
     """Return the patched bridge when tests/consumers installed one."""
-    return sys.modules.get("runtime.next.runtime_bridge") or importlib.import_module(
-        "runtime.next.runtime_bridge"
-    )
+    return sys.modules.get("runtime.next.runtime_bridge") or importlib.import_module("runtime.next.runtime_bridge")
 
 
 def _require_main_repo_unless_owned(func: _Command) -> _Command:
@@ -196,9 +193,7 @@ def next_step(
     )
 
     try:
-        mission_slug = _resolve_mission_slug(
-            mission, repo_root, effective_root=effective_root
-        )
+        mission_slug = _resolve_mission_slug(mission, repo_root, effective_root=effective_root)
     except _StatusReadPathNotFound as _exc:
         # FR-001 / C-IC02: preserve the typed read-path error (code + checked
         # paths + read-path remediation) instead of collapsing to MISSION_NOT_FOUND.
@@ -207,15 +202,18 @@ def next_step(
     except _MissionNotFoundError as _exc:
         _emit_mission_not_found_error(_exc.handle, json_output)
         raise typer.Exit(1) from _exc
-    except ValueError as _exc:
+    except UnsafePathSegmentError as _exc:
         # #2878: a traversal-shaped --mission value trips the safe-path-segment
         # guard (assert_safe_path_segment, reached through the placement seam
-        # inside _resolve_mission_slug) and raises a bare ValueError that the
+        # inside _resolve_mission_slug) and raises UnsafePathSegmentError, which the
         # _StatusReadPathNotFound/_MissionNotFoundError handlers above do not
         # cover. Convert it to merge's clean typed-error surface
         # (_resolve_slug_or_exit, cli/commands/merge.py): canonical diagnostic +
         # exit 2, never a raw traceback.
         _emit_unsafe_mission_slug_error(_exc, json_output)
+        raise typer.Exit(2) from _exc
+    except ValueError as _exc:
+        _emit_internal_resolution_error(_exc, json_output)
         raise typer.Exit(2) from _exc
     _validate_result_and_answer(result, answer, json_output)
     answered_id = _maybe_handle_answer(
@@ -249,13 +247,9 @@ def next_step(
     # WP05 (#843): pair the previous issuance's `started` lifecycle record
     # BEFORE we advance the runtime. This must run before decide_next so the
     # pair is observable even if decide_next raises.
-    _pair_previous_lifecycle_record(
-        agent, mission_slug, result, repo_root, effective_root=effective_root
-    )
+    _pair_previous_lifecycle_record(agent, mission_slug, result, repo_root, effective_root=effective_root)
 
-    decision = decide_next(
-        agent, mission_slug, result, repo_root, effective_root=effective_root
-    )
+    decision = decide_next(agent, mission_slug, result, repo_root, effective_root=effective_root)
     _emit_mission_next_invoked(
         agent,
         result,
@@ -303,21 +297,21 @@ def _commit_owned_next_mutations(effective_root: Path, mission_slug: str) -> Non
 
     mission_dir = compose_meta_json_path(effective_root, mission_slug).parent
     lifecycle = effective_root / "kitty-ops" / "lifecycle.jsonl"
-    mission_files = tuple(
-        path for path in sorted(mission_dir.rglob("*")) if path.is_file()
-    )
+    mission_files = tuple(path for path in sorted(mission_dir.rglob("*")) if path.is_file())
     paths = mission_files + ((lifecycle,) if lifecycle.is_file() else ())
     if not paths:
         return
-    target = mission_context_for(
-        effective_root,
-        mission_slug,
-        effective_root=effective_root,
-    ).artifact(MissionArtifactKind.PRIMARY_METADATA).commit_target
-    if target is None:
-        raise RuntimeError(
-            f"Owned checkout {effective_root} has no primary commit target for {mission_slug}"
+    target = (
+        mission_context_for(
+            effective_root,
+            mission_slug,
+            effective_root=effective_root,
         )
+        .artifact(MissionArtifactKind.PRIMARY_METADATA)
+        .commit_target
+    )
+    if target is None:
+        raise RuntimeError(f"Owned checkout {effective_root} has no primary commit target for {mission_slug}")
     try:
         safe_commit(
             repo_root=effective_root,
@@ -365,9 +359,7 @@ def _pair_previous_lifecycle_record(
         pair_previous_lifecycle_record as _seam_pair_previous_lifecycle_record,
     )
 
-    _seam_pair_previous_lifecycle_record(
-        agent, mission_slug, result, repo_root, effective_root=effective_root
-    )
+    _seam_pair_previous_lifecycle_record(agent, mission_slug, result, repo_root, effective_root=effective_root)
 
 
 def _write_issuance_lifecycle_record(
@@ -389,9 +381,7 @@ def _write_issuance_lifecycle_record(
         write_issuance_lifecycle_record as _seam_write_issuance_lifecycle_record,
     )
 
-    _seam_write_issuance_lifecycle_record(
-        agent, mission_slug, repo_root, decision, effective_root=effective_root
-    )
+    _seam_write_issuance_lifecycle_record(agent, mission_slug, repo_root, decision, effective_root=effective_root)
 
 
 def _maybe_emit_runtime_notice(json_output: bool) -> None:
@@ -450,7 +440,8 @@ def _run_charter_preflight_for_next(repo_root, *, advancing: bool, json_output: 
     stdout_redirect = contextlib.redirect_stdout(sys.stderr) if json_output else contextlib.nullcontext()
     with stdout_redirect:
         result = run_preflight_for_dashboard(repo_root)
-    emit_advisory_warnings(result)
+    # #3971: scope the single surfaced ambient warning to this consumer.
+    emit_advisory_warnings(result, consumer="next", repo_root=repo_root)
 
 
 def _resolve_mission_slug(
@@ -490,17 +481,19 @@ def _resolve_mission_slug(
         # the branch is unreachable in the new code path. Kept so a future
         # STATUS-partition regression still surfaces typed.
         if effective_root is None:
-            candidate = placement_seam(
-                get_main_repo_root(repo_root), raw_handle
-            ).read_dir(MissionArtifactKind.PRIMARY_METADATA)
+            candidate = placement_seam(get_main_repo_root(repo_root), raw_handle).read_dir(MissionArtifactKind.PRIMARY_METADATA)
         else:
             from mission_runtime import mission_context_for
 
-            candidate = mission_context_for(
-                effective_root,
-                raw_handle,
-                effective_root=effective_root,
-            ).artifact(MissionArtifactKind.PRIMARY_METADATA).read_dir
+            candidate = (
+                mission_context_for(
+                    effective_root,
+                    raw_handle,
+                    effective_root=effective_root,
+                )
+                .artifact(MissionArtifactKind.PRIMARY_METADATA)
+                .read_dir
+            )
     except StatusReadPathNotFound:
         # FR-001 / C-IC02: the read resolver produced a precise typed error
         # (e.g. COORDINATION_BRANCH_DELETED / STATUS_READ_PATH_NOT_FOUND) with the
@@ -522,9 +515,7 @@ def _print_error(message: str, json_output: bool) -> None:
         print(message, file=sys.stderr)
 
 
-def _emit_mission_not_found_error(
-    handle: str, json_output: bool, next_step: str | None = None
-) -> None:
+def _emit_mission_not_found_error(handle: str, json_output: bool, next_step: str | None = None) -> None:
     """Emit a structured MISSION_NOT_FOUND error in the appropriate format.
 
     Human mode writes to stderr; JSON mode writes a structured envelope to
@@ -552,18 +543,17 @@ def _emit_mission_not_found_error(
         print(json.dumps(payload, indent=2))
     else:
         print(
-            f"Error: Mission not found: '{handle}'\n"
-            f"No mission matching '{handle}' exists in this repository.",
+            f"Error: Mission not found: '{handle}'\nNo mission matching '{handle}' exists in this repository.",
             file=sys.stderr,
         )
         print(f"  Next: {remediation}", file=sys.stderr)
 
 
-def _emit_unsafe_mission_slug_error(exc: ValueError, json_output: bool) -> None:
+def _emit_unsafe_mission_slug_error(exc: UnsafePathSegmentError, json_output: bool) -> None:
     """Surface a traversal-unsafe ``--mission`` slug as a clean typed error.
 
-    #2878: the safe-path-segment guard inside the read resolver raises a bare
-    ``ValueError`` for traversal-shaped slugs (``../x``, ``a/b``, leading-dot,
+    #2878: the safe-path-segment guard inside the read resolver raises
+    ``UnsafePathSegmentError`` for traversal-shaped slugs (``../x``, ``a/b``, leading-dot,
     …). Mirrors merge's ``_resolve_slug_or_exit`` handling (the in-repo
     exemplar): the canonical safe-path-segment diagnostic, a single
     ``Error:`` line on stderr in human mode, a structured JSON envelope in
@@ -581,6 +571,23 @@ def _emit_unsafe_mission_slug_error(exc: ValueError, json_output: bool) -> None:
         payload: dict[str, object] = {
             "result": "error",
             "error_code": "UNSAFE_MISSION_SLUG",
+            "error": message,
+            "spec_kitty_version": __version__,
+        }
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Error: {message}", file=sys.stderr)
+
+
+def _emit_internal_resolution_error(exc: ValueError, json_output: bool) -> None:
+    """Preserve the CLI error envelope for an unexpected resolver failure."""
+    message = str(exc)
+    if json_output:
+        from specify_cli import __version__
+
+        payload: dict[str, object] = {
+            "result": "error",
+            "error_code": "INTERNAL_RESOLUTION_ERROR",
             "error": message,
             "spec_kitty_version": __version__,
         }
@@ -724,9 +731,7 @@ def _run_query_mode(
 
     try:
         if effective_root is None:
-            decision = runtime_bridge.query_current_state(
-                agent, mission_slug, repo_root
-            )
+            decision = runtime_bridge.query_current_state(agent, mission_slug, repo_root)
         else:
             decision = runtime_bridge.query_current_state(
                 agent,
@@ -741,9 +746,7 @@ def _run_query_mode(
         _emit_read_path_error(exc, json_output)
         raise typer.Exit(1) from exc
     except MissionNotFoundError as exc:
-        _emit_mission_not_found_error(
-            exc.handle, json_output, next_step=getattr(exc, "next_step", None)
-        )
+        _emit_mission_not_found_error(exc.handle, json_output, next_step=getattr(exc, "next_step", None))
         raise typer.Exit(1) from exc
     except QueryModeValidationError as exc:
         # C-ERR-1 / FR-003: emit a structured payload (error_code + next_step)
@@ -786,9 +789,7 @@ def _emit_mission_next_invoked(
         emit_mission_next_invoked as _seam_emit_mission_next_invoked,
     )
 
-    _seam_emit_mission_next_invoked(
-        agent, result, mission_slug, repo_root, decision, effective_root=effective_root
-    )
+    _seam_emit_mission_next_invoked(agent, result, mission_slug, repo_root, decision, effective_root=effective_root)
 
 
 def _print_decision(decision, json_output: bool, answered_id: str | None, answer: str | None) -> None:
@@ -849,17 +850,19 @@ def _handle_answer(
         # ``mission_context_for`` instead so an owned ``--answer`` reads the
         # owned checkout's mission content, not primary's.
         if effective_root is None:
-            feature_dir = placement_seam(
-                repo_root_path, mission_slug
-            ).read_dir(MissionArtifactKind.PRIMARY_METADATA)
+            feature_dir = placement_seam(repo_root_path, mission_slug).read_dir(MissionArtifactKind.PRIMARY_METADATA)
         else:
             from mission_runtime import mission_context_for
 
-            feature_dir = mission_context_for(
-                repo_root_path,
-                mission_slug,
-                effective_root=effective_root,
-            ).artifact(MissionArtifactKind.PRIMARY_METADATA).read_dir
+            feature_dir = (
+                mission_context_for(
+                    repo_root_path,
+                    mission_slug,
+                    effective_root=effective_root,
+                )
+                .artifact(MissionArtifactKind.PRIMARY_METADATA)
+                .read_dir
+            )
         mission_type = get_mission_type(feature_dir)
         run_ref = runtime_bridge.get_or_start_run(mission_slug, repo_root_path, mission_type)
 
@@ -947,6 +950,17 @@ def _print_standard_human(decision) -> None:
 
     if decision.guard_failures:
         print(f"  Guards pending: {', '.join(decision.guard_failures)}")
+        # #3883/#4390: name the path each guard read. "missing" without a
+        # location is not diagnosable without reading the runtime's source,
+        # which is what turned the reported query/advance disagreement into
+        # a dead end. ``guard_failure_paths`` is keyed by the real artifact
+        # tag (not the raw failure string, which may be a free-form
+        # non-artifact message) — iterate its own keys so a non-artifact
+        # guard failure (WP status, source count, ...) never grows a
+        # fabricated "looked for" line.
+        searched = getattr(decision, "guard_failure_paths", None) or {}
+        for tag in sorted(searched):
+            print(f"    - {tag}: looked for {searched[tag]}")
 
     if decision.reason:
         print(f"  Reason: {decision.reason}")

@@ -25,6 +25,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from charter.activation.pack_context import CharterPackConfigError
 from runtime.next._tmp_namespace import prompt_tmp_dir
 from specify_cli.mission_metadata import mission_identity_fields
 from specify_cli.status import wp_state_for
@@ -102,6 +103,11 @@ class Decision:
     prompt_file: str | None = None
     reason: str | None = None
     guard_failures: list[str] = field(default_factory=list)
+    # #3883: the path each failing guard actually read, so a blocked
+    # result is diagnosable without a source read. Additive and
+    # defaulted: ``guard_failures`` keeps its exact identity strings
+    # (the SC-007 query/advance parity invariant compares those).
+    guard_failure_paths: dict[str, str] = field(default_factory=dict)
     progress: dict | None = None
     origin: dict = field(default_factory=dict)
     # Runtime fields (added in v2.0.0)
@@ -134,13 +140,9 @@ class Decision:
         if self.kind == DecisionKind.step:
             prompt = self.prompt_file
             if not prompt:
-                raise InvalidStepDecision(
-                    "kind='step' requires a non-empty prompt_file; got None/empty"
-                )
+                raise InvalidStepDecision("kind='step' requires a non-empty prompt_file; got None/empty")
             if not Path(prompt).is_file():
-                raise InvalidStepDecision(
-                    f"kind='step' prompt_file must resolve on disk: {prompt!r} does not"
-                )
+                raise InvalidStepDecision(f"kind='step' prompt_file must resolve on disk: {prompt!r} does not")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -164,6 +166,7 @@ class Decision:
             "prompt_file": self.prompt_file,
             "reason": self.reason,
             "guard_failures": self.guard_failures,
+            "guard_failure_paths": self.guard_failure_paths,
             "progress": self.progress,
             "origin": self.origin,
             "run_id": self.run_id,
@@ -332,10 +335,55 @@ def decide_next(
     from runtime.next.runtime_bridge import decide_next_via_runtime
 
     if effective_root is None:
-        return decide_next_via_runtime(agent, mission_slug, result, repo_root)
-    return decide_next_via_runtime(
-        agent, mission_slug, result, repo_root, effective_root=effective_root
-    )
+        decision = decide_next_via_runtime(agent, mission_slug, result, repo_root)
+    else:
+        decision = decide_next_via_runtime(agent, mission_slug, result, repo_root, effective_root=effective_root)
+    return _with_guard_failure_paths(decision, repo_root)
+
+
+def _with_guard_failure_paths(decision: Decision, repo_root: Path) -> Decision:
+    """Attach the path each failing guard read, keyed by the real artifact
+    tag (#3883, #4390).
+
+    A blocked decision that names an artifact but not the directory it was
+    read from is not diagnosable without a source read — the reported
+    query-vs-advance disagreement was unrecoverable for exactly that reason.
+    The paths come from ``runtime_bridge_io.guard_failure_artifact_paths``,
+    which resolves the same placement seam ``gather_artifact_presence`` uses
+    for its own reads, so this reports where the guard actually looked rather
+    than a second guess at it.
+
+    #4390: ``guard_failures`` is keyed by real artifact tag, not by the raw
+    failure string — every registered mission family's guard table
+    (software-dev/research/documentation/plan) reports genuine
+    artifact-presence failures as human-readable MESSAGES
+    (``"Required artifact missing: {name}"``), not filenames, and mixes them
+    with free-form non-artifact failures (WP status, source counts, ...).
+    Keying by the raw string (the pre-#4390 shape) fabricated a "looked for"
+    path for every failure indiscriminately. ``guard_failure_artifact_paths``
+    resolves the real tag for each failure and only emits an entry for a
+    genuine artifact-presence failure; the render (``next_cmd.py``) iterates
+    the resulting tags directly, never ``decision.guard_failures``.
+
+    Reporting must never change the outcome: any failure to resolve leaves the
+    decision exactly as the runtime produced it.
+    """
+    if not decision.guard_failures or decision.guard_failure_paths:
+        return decision
+    try:
+        from runtime.next.runtime_bridge import _resolve_runtime_feature_dir, get_mission_type
+        from runtime.next.runtime_bridge_io import guard_failure_artifact_paths
+
+        feature_dir = _resolve_runtime_feature_dir(repo_root, decision.mission_slug)
+        decision.guard_failure_paths = guard_failure_artifact_paths(
+            feature_dir,
+            mission_family=decision.mission or get_mission_type(feature_dir),
+            repo_root=repo_root,
+            guard_failures=decision.guard_failures,
+        )
+    except Exception as exc:  # noqa: BLE001 — diagnostics must never break a decision
+        _logger.debug("guard-failure paths unavailable for %s: %s", decision.mission_slug, exc)
+    return decision
 
 
 # ---------------------------------------------------------------------------
@@ -469,8 +517,6 @@ def _build_prompt_safe(
     return path
 
 
-
-
 def _build_prompt_or_error(
     action: str,
     feature_dir: Path,
@@ -506,18 +552,12 @@ def _build_prompt_or_error(
             resolve_mission_type_context,
         )
 
-        action_sequence = resolve_mission_type_context(
-            repo_root, mission_type=mission_type
-        ).action_sequence
+        action_sequence = resolve_mission_type_context(repo_root, mission_type=mission_type).action_sequence
         _is_composed_action = wp_id is None and action in action_sequence
     except Exception:
         pass
     if _is_composed_action:
-        composed_prompt = (
-            f"# {mission_type} — {action}\n\n"
-            f"This step is dispatched via composition.\n"
-            f"Run `spec-kitty next --agent <name>` to advance.\n"
-        )
+        composed_prompt = f"# {mission_type} — {action}\n\nThis step is dispatched via composition.\nRun `spec-kitty next --agent <name>` to advance.\n"
         marker_fd, marker_path = tempfile.mkstemp(
             prefix=f"spec-kitty-composed-{action}-",
             suffix=".md",
@@ -543,14 +583,9 @@ def _build_prompt_or_error(
         path_str = str(prompt_path)
         try:
             if not Path(path_str).exists():
-                return None, (
-                    f"prompt template did not materialize on disk for action "
-                    f"'{action}' (path={path_str})"
-                )
+                return None, (f"prompt template did not materialize on disk for action '{action}' (path={path_str})")
         except OSError as exc:
-            return None, (
-                f"prompt template path is not stat-able for action '{action}': {exc}"
-            )
+            return None, (f"prompt template path is not stat-able for action '{action}': {exc}")
         return path_str, None
     except FileNotFoundError:
         # No file-based template for this non-WP step (e.g. workflow-inserted
@@ -560,11 +595,7 @@ def _build_prompt_or_error(
         # ``kind=blocked`` decision, write a minimal composition marker so the
         # ``kind=step`` invariant is satisfied (FR-007 / T019).
         if wp_id is None:
-            composed_prompt = (
-                f"# {mission_type} — {action}\n\n"
-                f"This step is dispatched via composition.\n"
-                f"Run `spec-kitty next --agent <name>` to advance.\n"
-            )
+            composed_prompt = f"# {mission_type} — {action}\n\nThis step is dispatched via composition.\nRun `spec-kitty next --agent <name>` to advance.\n"
             marker_fd, marker_path = tempfile.mkstemp(
                 prefix=f"spec-kitty-composed-{action}-",
                 suffix=".md",
@@ -573,12 +604,14 @@ def _build_prompt_or_error(
             os.write(marker_fd, composed_prompt.encode("utf-8"))
             os.close(marker_fd)
             return marker_path, None
-        return None, (
-            f"prompt resolution failed for action '{action}': "
-            f"FileNotFoundError: no template found"
-        )
+        return None, (f"prompt resolution failed for action '{action}': FileNotFoundError: no template found")
+    except CharterPackConfigError as exc:
+        # A corrupt/unreadable ``.kittify/config.yaml`` (bad encoding or
+        # malformed YAML) is an operator-facing configuration fault, not an
+        # internal crash. Surface the fail-loud body verbatim (it names the
+        # offending file and the decode/parse cause) so the blocked decision
+        # renders without a Python traceback or a raw exception class name.
+        # ``str(exc)`` would yield only the machine code, so use ``exc.body``.
+        return None, exc.body
     except Exception as exc:
-        return None, (
-            f"prompt resolution failed for action '{action}': "
-            f"{type(exc).__name__}: {exc}"
-        )
+        return None, (f"prompt resolution failed for action '{action}': {type(exc).__name__}: {exc}")

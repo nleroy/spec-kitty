@@ -520,7 +520,14 @@ def _run_create_core_phase(
     except MissionCreationError as exc:
         error_msg = str(exc)
         if json_output:
-            _emit_json({"error": error_msg})
+            # #3861: carry the delegate's TYPED failure reason (e.g.
+            # ``MissionAlreadyExistsError.error_code``) into the --json
+            # envelope so scripted callers (the orchestrator-api ``specify``
+            # verb) classify on the structured code, never on message prose.
+            error_payload: dict[str, object] = {"error": error_msg}
+            if exc.error_code is not None:
+                error_payload["error_code"] = exc.error_code
+            _emit_json(error_payload)
         else:
             console.print(f"[bold red]Error:[/bold red] {error_msg}")
             _print_worktree_navigation_hint(mission_slug, error_msg)
@@ -663,7 +670,23 @@ def _emit_create_result_phase(
         console.print(f"   Directory: {result.feature_dir}")
         # Issue #846: spec.md is no longer auto-committed at create time.
         # The agent commits it from /spec-kitty.specify after writing substantive content.
-        console.print(f"   Meta committed to {result.target_branch}; spec.md scaffold left untracked")
+        # Issue #4608: the meta line must report what actually landed. When the
+        # transactional scaffold commit was refused (protected or unavailable
+        # target branch), meta.json sits in ``result.uncommitted_files`` — the
+        # same evidence the ``--json`` envelope discloses via
+        # ``uncommitted_artifacts`` — and claiming a commit would be false.
+        if (result.feature_dir / "meta.json") in result.uncommitted_files:
+            console.print(
+                f"   [yellow]Meta not committed:[/yellow] the scaffold commit to "
+                f"{result.target_branch} was refused (protected or unavailable target "
+                f"branch); kitty-specs/{result.mission_slug}/ is left on disk, untracked"
+            )
+            console.print(
+                "   Planning artifacts must land on a feature branch, or land via the mission lane worktree "
+                "— switch to a feature branch first, or re-run 'agent mission create --start-branch <feature-branch>'."
+            )
+        else:
+            console.print(f"   Meta committed to {result.target_branch}; spec.md scaffold left untracked")
         console.print("   [yellow]Scaffold only:[/yellow] run [cyan]/spec-kitty.specify <intent>[/cyan] in your agent, or edit and commit spec.md before planning.")
 
 

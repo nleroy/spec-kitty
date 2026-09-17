@@ -82,12 +82,15 @@ the same split upstream draws between its HTTP API and its MCP tools); every
 
 from __future__ import annotations
 
+import math
 import secrets
+import time
+import urllib.error
 
 from collections.abc import Callable, Generator, Iterator, Mapping
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from . import credentials, filtered_stream, grammar
+from . import credentials, filtered_stream, grammar, own_filter
 from .live_frame import LiveFrame, MAX_TTL_S, TeamSnapshot
 
 # The same honest reported-live ceiling live_frame/filtered_stream enforce
@@ -95,6 +98,9 @@ from .live_frame import LiveFrame, MAX_TTL_S, TeamSnapshot
 # Re-declared, not imported, matching that module's own "read-side module
 # stays independent" reasoning for why it re-declares transport's constant
 # rather than importing it.
+if TYPE_CHECKING:
+    from .agent_delivery import AgentDelivery
+
 MAX_TIMEOUT_S: int = MAX_TTL_S
 
 DEFAULT_STATUS_TIMEOUT_S: float = 2.0
@@ -109,7 +115,12 @@ class NotCheckedOut(Exception):
     never auto-provisions one — see the module docstring."""
 
     def __init__(self, repo: str) -> None:
-        super().__init__(f"no stored Zeitgeist credential for repo {repo!r}; run the checkout flow first")
+        super().__init__(
+            f"no stored Zeitgeist credential for repo {repo!r}; run the checkout flow first "
+            "(a publishing command in this logical session stores it — readers only read the cache; "
+            "set SPEC_KITTY_ZEITGEIST_SESSION_ID to the same value in both processes when running "
+            "a distinct concurrent agent)"
+        )
         self.repo = repo
 
 
@@ -124,7 +135,7 @@ def _close(gen: Iterator[LiveFrame]) -> None:
 
 
 def _clamp_timeout(timeout_s: float) -> float:
-    if timeout_s <= 0:
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
         raise ValueError("timeout_s must be > 0")
     return min(float(timeout_s), float(MAX_TIMEOUT_S))
 
@@ -144,6 +155,7 @@ def resolve_stream(
     repo: str,
     *,
     frame_filter: Callable[[LiveFrame], bool] | None = None,
+    filter_own: bool = False,
 ) -> filtered_stream.FilteredStream:
     """Build exactly one ``FilteredStream`` for ``repo``'s already-stored
     credential. Raises :class:`NotCheckedOut` rather than constructing a
@@ -156,7 +168,10 @@ def resolve_stream(
     ``frame_filter`` (#190) threads an agent surface's moment preferences
     into the subscription itself — the predicate drops frames inside
     ``FilteredStream.watch()`` before they reach state or caller. It changes
-    what THIS stream carries, never what the relay sends."""
+    what THIS stream carries. ``filter_own`` independently requests relay
+    suppression before queueing using the current cached issuer identities."""
+    if not isinstance(filter_own, bool):
+        raise ValueError("filter_own must be a boolean")
     stored = credentials.load(repo=repo)
     if stored is None:
         raise NotCheckedOut(repo)
@@ -164,6 +179,7 @@ def resolve_stream(
         relay_url=stored.relay_url,
         relay_token=stored.token,
         capability_credential=stored.capability_credential or stored.token,
+        own_sessions=own_filter.identity_header(stored) if filter_own else None,
     )
     return filtered_stream.FilteredStream(config, frame_filter=frame_filter)
 
@@ -180,6 +196,7 @@ def _serialize_snapshot(snapshot: TeamSnapshot) -> dict[str, Any]:
                 "path": p.path,
                 "kind": p.kind,
                 "expires_at": p.expires_at,
+                "observed_at": p.observed_at,
             }
             for p in snapshot.presence
         ],
@@ -192,6 +209,7 @@ def _serialize_snapshot(snapshot: TeamSnapshot) -> dict[str, Any]:
                 "repo": f.repo,
                 "branch": f.branch,
                 "expires_at": f.expires_at,
+                "observed_at": f.observed_at,
             }
             for f in snapshot.focus
         ],
@@ -344,27 +362,58 @@ def render_event(frame: Mapping[str, Any]) -> str:
     return untrusted_block(_bounded("\n".join(lines), kept, dropped))
 
 
-def status(repo: str, *, timeout_s: float = DEFAULT_STATUS_TIMEOUT_S) -> dict[str, Any]:
-    """One explicit team context, one bounded read: open exactly one
-    subscription, apply whatever arrives inside ``timeout_s`` (clamped to
-    :data:`MAX_TIMEOUT_S`), then report the local snapshot and let the
-    subscription go. Never writes anything to disk; never retries.
+def status(repo: str, *, timeout_s: float = DEFAULT_STATUS_TIMEOUT_S, filter_own: bool = False) -> dict[str, Any]:
+    """One explicit team context, one bounded read of who is live NOW.
 
-    Raises :class:`NotCheckedOut` if ``repo`` has no stored credential, and
+    spec-kitty#4215: the relay's own ``GET /managed/snapshot``
+    (zeitgeist#296) answers immediately from the presence/focus registries,
+    so a quiet team reads as "three people here, observed 40s ago" instead of
+    the empty view a future-only listen returns whenever nobody happens to
+    publish during the window. ``source`` says which path answered.
+
+    A relay without that route (an older build, or ``self_hosted``, which
+    does not enable the capability) answers 404, and so does a body this
+    client cannot parse: both degrade to the original behaviour — open one
+    subscription, apply whatever arrives inside ``timeout_s`` (clamped to
+    :data:`MAX_TIMEOUT_S`), report what was heard — with ``fallback_reason``
+    naming why. A quiet window there still means "nothing was published while
+    I listened", never "nobody is working"; only the snapshot path can speak
+    to the latter, and it does so with each entry's own ``observed_at``.
+
+    Never writes anything to disk; never retries. Raises
+    :class:`NotCheckedOut` if ``repo`` has no stored credential, and
     propagates ``urllib.error.URLError``/``HTTPError`` unchanged on a
-    connection/relay fault — this is a thin adapter over
-    ``FilteredStream.watch()``, not a second fault-handling layer over it.
+    connection/relay fault (an expired credential's 401/403 included — a
+    denied read is reported as a fault, never as an empty team).
     """
     timeout_s = _clamp_timeout(timeout_s)
-    stream = resolve_stream(repo)
-    gen = stream.watch(idle_timeout_s=timeout_s)
+    stream = resolve_stream(repo, filter_own=filter_own)
+
+    fallback_reason: str | None = None
     try:
-        for _ in gen:
-            pass  # apply every frame that arrives inside the bounded window
-    finally:
-        _close(gen)
+        seeded = stream.seed_from_snapshot(timeout_s=timeout_s)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise  # auth denial, a saturated relay, a relay fault: the caller's to report
+        seeded = False
+        fallback_reason = "snapshot_route_unavailable"
+    if not seeded and fallback_reason is None:
+        fallback_reason = "snapshot_document_unreadable"
+
+    if not seeded:
+        gen = stream.watch(idle_timeout_s=timeout_s)
+        try:
+            for _ in gen:
+                pass  # apply every frame that arrives inside the bounded window
+        finally:
+            _close(gen)
+
     result = _serialize_snapshot(stream.check())
     result["repo"] = repo
+    result["source"] = "relay_snapshot" if seeded else "live_listen"
+    if fallback_reason is not None:
+        result["fallback_reason"] = fallback_reason
+        result["listened_s"] = timeout_s
     return result
 
 
@@ -397,3 +446,135 @@ def watch(
                 return
     finally:
         _close(gen)
+
+
+def agent_watch(
+    repo: str,
+    *,
+    timeout_s: float = DEFAULT_WATCH_TIMEOUT_S,
+    max_frames: int = MAX_WATCH_FRAMES,
+    delivery: AgentDelivery | None = None,
+    acknowledge: str | None = None,
+    filter_own: bool = True,
+) -> dict[str, Any]:
+    """Agent watch with shared filters, novelty and explicit delivery receipts."""
+    from .agent_delivery import AgentDelivery
+    from . import moments
+
+    policy = delivery if delivery is not None else AgentDelivery(repo)
+    # A previous successful delivery is acknowledged even when this call is
+    # refused by the repos admission filter: dropping the caller's receipt
+    # here would silently lose an ack (no error, no commit) and force a
+    # duplicate re-delivery on the next admitted call (finding #3, PR #4224).
+    policy.acknowledge(acknowledge)
+    if not moments.allows_repo(policy.settings, repo):
+        return {
+            "repo": repo,
+            "frames": [],
+            "withheld_by": "repos_filter",
+            "withheld": {"filtered": 0, "duplicates": 0, "rate": 0, "budget": 0},
+            "receipt": None,
+            "own_filter": "not_read" if filter_own else "disabled",
+            "settings": policy.settings.as_dict(),
+        }
+    timeout_s = _clamp_timeout(timeout_s)
+    max_frames = min(_require_positive_max_frames(max_frames), MAX_WATCH_FRAMES)
+    stream = resolve_stream(repo, filter_own=filter_own)
+    gen = stream.watch(idle_timeout_s=timeout_s)
+    try:
+        result = policy.select((_serialize_frame(frame) for frame in gen), max_frames=max_frames)
+        result["own_filter"] = "relay_verified" if filter_own else "disabled"
+        return result
+    finally:
+        _close(gen)
+
+
+def agent_activity(
+    repo: str,
+    *,
+    window_s: int = 900,
+    timeout_s: float = DEFAULT_STATUS_TIMEOUT_S,
+    max_frames: int = MAX_WATCH_FRAMES,
+    replay: bool = False,
+    delivery: AgentDelivery | None = None,
+    acknowledge: str | None = None,
+    filter_own: bool = True,
+) -> dict[str, Any]:
+    """Bounded retained catch-up; replay intentionally retrieves seen frames."""
+    from .agent_delivery import AgentDelivery
+    from .history import MAX_HISTORY_PAGES, read_history
+    from . import moments
+
+    policy = delivery if delivery is not None else AgentDelivery(repo)
+    # Acknowledge before the admission check, for the same reason as
+    # agent_watch: a refused call must not drop the caller's receipt
+    # (finding #3, PR #4224).
+    policy.acknowledge(acknowledge)
+    if not moments.allows_repo(policy.settings, repo):
+        return {
+            "repo": repo,
+            "frames": [],
+            "withheld_by": "repos_filter",
+            "withheld": {"filtered": 0, "duplicates": 0, "rate": 0, "budget": 0},
+            "receipt": None,
+            "own_filter": "not_read" if filter_own else "disabled",
+            "settings": policy.settings.as_dict(),
+        }
+    max_frames = min(_require_positive_max_frames(max_frames), MAX_WATCH_FRAMES)
+    deadline = time.monotonic() + _clamp_timeout(timeout_s)
+    coverage: dict[str, Any] = {}
+    gaps: list[dict[str, Any]] = []
+    own_verified = False
+
+    def merge_coverage(page_coverage: Mapping[str, Any]) -> None:
+        """Fold one page's coverage into the catch-up whole. A multi-page
+        catch-up must report the union, never just the last page: withheld
+        frames sum, truncation and reset OR together, every retained gap is
+        kept, and epoch/seq/continuation track the furthest page read
+        (finding #4, PR #4224)."""
+        if not coverage:
+            coverage.update(page_coverage)
+        else:
+            # ``read_history`` always returns the full coverage shape; the
+            # ``get`` defaults only keep a partial dict from crashing an
+            # in-flight catch-up (the old blind ``update`` was accidentally
+            # tolerant of one).
+            for key in ("epoch", "seq"):
+                if key in page_coverage:
+                    coverage[key] = page_coverage[key]
+            coverage["truncated"] = coverage.get("truncated", False) or page_coverage.get("truncated", False)
+            coverage["withheld_count"] = coverage.get("withheld_count", 0) + page_coverage.get("withheld_count", 0)
+            coverage["continuation"] = page_coverage.get("continuation")
+        coverage["reset"] = coverage.get("reset", False) or page_coverage.get("reset", False)
+        gap = page_coverage.get("gap")
+        if gap is not None and gap not in gaps:
+            gaps.append(gap)
+        # ``gap`` stays the earliest single gap for existing consumers; the
+        # full accumulation rides alongside it as ``gaps``.
+        coverage["gap"] = gaps[0] if gaps else None
+        coverage["gaps"] = list(gaps)
+
+    def retained_frames() -> Iterator[dict[str, Any]]:
+        nonlocal own_verified
+        since = None
+        for _ in range(MAX_HISTORY_PAGES):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                coverage["scan_limit_reached"] = True
+                return
+            page = read_history(repo, window_s=window_s, timeout_s=remaining, since=since, filter_own=filter_own)
+            own_verified = filter_own
+            merge_coverage(page["coverage"])
+            yield from page["frames"]
+            continuation = coverage.get("continuation")
+            if continuation is None:
+                return
+            if continuation == since:
+                raise ValueError("History continuation made no progress")
+            since = continuation
+        coverage["scan_limit_reached"] = True
+
+    result = policy.select(retained_frames(), max_frames=max_frames, replay=replay)
+    result["own_filter"] = "relay_verified" if own_verified else "not_read" if filter_own else "disabled"
+    result["coverage"] = coverage
+    return result

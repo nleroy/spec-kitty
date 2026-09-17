@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, NoReturn, TypeAlias
 
 import typer
 
@@ -89,7 +89,6 @@ from specify_cli.missions._read_path_resolver import (
 )
 from specify_cli.status import (
     PROGRESS_SEMANTICS,
-    CanonicalStatusNotFoundError,
     Lane,
     StatusEvent,
     StatusSnapshot,
@@ -109,6 +108,7 @@ def _default_status_ports() -> TasksPorts:
     human render AND the ``@patch("...tasks.console.print")`` seams intercepting.
     """
     from specify_cli.cli.commands.agent import tasks as _tasks
+
     return TasksPorts(
         fs=_tasks.RealFsReader(),
         coord=_tasks.RealCoordCommitRouter(),
@@ -150,6 +150,26 @@ class _StatusState:
     stalled_wps: list[dict[str, object]] = field(default_factory=list)
 
 
+def _status_error(json_output: bool, message: str) -> None:
+    """Render status failures at the command boundary."""
+    from specify_cli.cli.commands.agent import tasks as _tasks
+    from specify_cli.cli.json_contract import json_error
+
+    if json_output:
+        _tasks.console.emit_json(json_error("status_failed", message))
+    else:
+        _tasks._output_error(False, message)
+
+
+def _status_selector_error(code: str, message: str, exit_code: int, details: dict[str, object]) -> NoReturn:
+    """Adapt selector diagnostics before legacy delegates render any output."""
+    from specify_cli.cli.commands.agent import tasks as _tasks
+    from specify_cli.cli.json_contract import json_error
+
+    _tasks.console.emit_json({**json_error(code, message), **details})
+    raise typer.Exit(exit_code)
+
+
 def _st_resolve_dirs(st: _StatusState) -> None:
     """Phase A: repo/mission resolution + the CWD-independent read-dir resolution.
 
@@ -158,18 +178,21 @@ def _st_resolve_dirs(st: _StatusState) -> None:
     (WP08 T037, FR-030) with the legacy worktree-aware fallback preserved.
     """
     from specify_cli.cli.commands.agent import tasks as _tasks
+
     st.cwd = Path.cwd().resolve()
     repo_root = _tasks.locate_project_root(st.cwd)
     if repo_root is None:
+        _status_error(st.json_output, "Not in a spec-kitty project")
         raise typer.Exit(1)
     st.repo_root = repo_root
 
     st.mission_slug = _tasks._find_mission_slug(
-        explicit_mission=st.mission, json_output=st.json_output, repo_root=repo_root
+        explicit_mission=st.mission,
+        json_output=st.json_output,
+        repo_root=repo_root,
+        error_handler=_status_selector_error if st.json_output else None,
     )
-    st.main_repo_root, _ = _tasks._ensure_target_branch_checked_out(
-        repo_root, st.mission_slug, st.json_output
-    )
+    st.main_repo_root, _ = _tasks._ensure_target_branch_checked_out(repo_root, st.mission_slug, st.json_output)
 
     # Route through the single guarded read-side seam (WP01/IC-01; FR-002, C-007).
     from specify_cli.missions._read_path_resolver import (
@@ -194,20 +217,15 @@ def _st_resolve_dirs(st: _StatusState) -> None:
         if legacy_dir.exists():
             feature_dir = legacy_dir
         else:
-            _tasks.console.print(f"[red]Error:[/red] Mission directory not found: {feature_dir}")
+            _status_error(st.json_output, f"Mission directory not found: {feature_dir}")
             raise typer.Exit(1)
     st.feature_dir = feature_dir
 
     # PRIMARY leg — tasks/ is PRIMARY-partition (FR-001 / C-001 per-leg split —
     # WP03 T009). The STATUS leg stays on the coord-aware ``feature_dir`` above.
-    st.tasks_dir = (
-        placement_seam(st.main_repo_root, st.mission_slug).read_dir(
-            MissionArtifactKind.WORK_PACKAGE_TASK
-        )
-        / "tasks"
-    )
+    st.tasks_dir = placement_seam(st.main_repo_root, st.mission_slug).read_dir(MissionArtifactKind.WORK_PACKAGE_TASK) / "tasks"
     if not st.tasks_dir.exists():
-        _tasks.console.print(f"[red]Error:[/red] Tasks directory not found: {st.tasks_dir}")
+        _status_error(st.json_output, f"Tasks directory not found: {st.tasks_dir}")
         raise typer.Exit(1)
 
 
@@ -272,11 +290,10 @@ def _st_gated_runtime_fields(feature_dir: Path, wp_id: str | None) -> tuple[str,
     return str(row["agent"]), str(row["shell_pid"])
 
 
-def _st_resolve_execution_mode(
-    front: str, main_repo_root: Path, mission_slug: str, wp_id: str | None
-) -> tuple[str, str]:
+def _st_resolve_execution_mode(front: str, main_repo_root: Path, mission_slug: str, wp_id: str | None) -> tuple[str, str]:
     """Resolve ``(execution_mode, workspace_kind)`` for one WP row (verbatim fallbacks)."""
     from specify_cli.cli.commands.agent import tasks as _tasks
+
     if wp_id is None:
         # No work_package_id in frontmatter — the workspace resolvers require a
         # WP id, so classification is impossible. Take the same frontmatter →
@@ -309,59 +326,46 @@ def _st_load_work_packages(st: _StatusState) -> None:
     Loads canonical lanes from the event log (lane is event-log-only), then reads
     each WP's frontmatter into a status row and freezes the declared dependencies
     for the pure ``build_status_view`` readiness map.
+
+    #3829 item 3 — one committed reduction per board: when the committed
+    PRIMARY surface is authoritative for this mission
+    (:func:`committed_authority.committed_status_dir` — merged + committed
+    log present), the WHOLE row comes from that one dir: the lane, the
+    companion fields (``resolved_agent_profile``/``resolved_model``/
+    ``agent``/``shell_pid`` via ``reconstruct_wp_view``) AND the
+    events/readiness reduction. Before this, only the lane was committed-
+    sourced while the companions and the snapshot still read the possibly-
+    stale coordination ``feature_dir`` — a merged mission rendered the
+    correct committed lane beside stale coordination companions. When the
+    committed surface is NOT authoritative (not merged / no committed log),
+    ``status_read_dir`` IS ``st.feature_dir`` and every read is
+    byte-identical to the coordination-aware board of before.
     """
-    from runtime.next.committed_authority import committed_wp_lane
-    from specify_cli.cli.commands.agent import tasks as _tasks
+    from runtime.next.committed_authority import committed_status_dir
 
-    def _committed_lane(wp_id: str | None) -> str | None:
-        """Return the committed PRIMARY-surface lane for *wp_id*, when available.
+    committed_dir = committed_status_dir(st.main_repo_root, st.mission_slug)
+    status_read_dir = committed_dir if committed_dir is not None else st.feature_dir
 
-        Routes through :func:`committed_wp_lane` (WP01 D10/IC-04): the board's
-        lane rollup must not misreport a merged mission's WPs as still-planned
-        just because the topology-resolved ``feature_dir`` happens to be a
-        stale, not-yet-cleaned-up coordination checkout (#2947). Returns
-        ``None`` when no *wp_id* is available, or when the committed status
-        log is genuinely absent on PRIMARY (an in-flight coordination-topology
-        mission whose status lives only on the coordination worktree until
-        merge) -- the caller then falls back to its own coordination-aware
-        read (``_st_runtime_row``'s ``lane``), unchanged. A committed
-        ``uninitialized`` result (WP absent from the PRIMARY snapshot) is
-        likewise treated as "no committed data" -- that sentinel must never
-        surface on the board (it is a non-display lane).
-
-        A CORRUPT (present-but-unparsable) PRIMARY event log also degrades to
-        ``None`` here -- the board must render, not crash, matching the
-        pre-existing defensive ``except Exception`` a few lines below that
-        already tolerates a corrupt event log for its own (non-committed)
-        read. ``CanonicalStatusNotFoundError`` is NOT part of this catch: a
-        genuinely-absent log is handled inside ``committed_wp_lane`` itself
-        (it checks ``has_event_log`` before ever reading), so this board-only
-        degrade path exists solely for parse/read failures on a log that DOES
-        exist on disk. Callers that need the fail-loud contract on a
-        genuinely-absent log (``wp_ending``, ``_should_advance_wp_step``) are
-        untouched -- this local except is scoped to the board's own display
-        fallback, not the shared committed-authority module.
-        """
-        if not wp_id:
-            return None
-        try:
-            lane = committed_wp_lane(st.main_repo_root, st.mission_slug, wp_id)
-        except CanonicalStatusNotFoundError:
-            raise
-        except Exception:
-            return None
-        if lane is None or lane == Lane.UNINITIALIZED:
-            return None
-        return lane
-
-    try:
+    def _read_events_and_snapshot(read_dir: Path) -> None:
         from specify_cli.status import read_events as _st_read_events
         from specify_cli.status import reduce as _st_reduce
 
-        st.events = _st_read_events(st.feature_dir)
+        st.events = _st_read_events(read_dir)
         st.snapshot = _st_reduce(st.events) if st.events else None
+
+    try:
+        _read_events_and_snapshot(status_read_dir)
     except Exception:
+        # The board must render, not crash. A corrupt log on the committed
+        # surface falls back to the coordination read (the pre-#3829
+        # degrade); a corrupt coordination log degrades to no events, as
+        # before.
         st.events = []
+        if status_read_dir != st.feature_dir:
+            try:
+                _read_events_and_snapshot(st.feature_dir)
+            except Exception:
+                st.events = []
 
     # WP05: declared dependencies per WP id, frozen from the SAME frontmatter parse
     # already performed here (no extra file read).
@@ -378,16 +382,33 @@ def _st_load_work_packages(st: _StatusState) -> None:
         else:
             wp_deps = []
         st.wp_dependencies[wp_id or wp_file.stem] = wp_deps
-        execution_mode, workspace_kind = _st_resolve_execution_mode(
-            front, st.main_repo_root, st.mission_slug, wp_id
-        )
+        execution_mode, workspace_kind = _st_resolve_execution_mode(front, st.main_repo_root, st.mission_slug, wp_id)
         # Route agent/shell_pid + the resolved-binding actuals through the ONE
         # reconstruction reader (SC-007). The authored ``agent_profile`` stays
         # frontmatter-canonical (design intent for the HiC marker) and DISTINCT
         # from ``resolved_agent_profile`` (what actually ran) — C-008.
-        _st_row = _st_runtime_row(st.feature_dir, wp_id)
-        committed_lane = _committed_lane(wp_id)
-        lane_source = committed_lane if committed_lane is not None else str(_st_row["lane"] or Lane.GENESIS)
+        # #3829 item 3: the reader is pointed at the SAME one reduction the
+        # lane came from — ``status_read_dir`` (the committed dir when the
+        # committed surface is authoritative, the coordination ``feature_dir``
+        # otherwise) — so a merged mission's row never mixes a committed lane
+        # with stale coordination companions. A corrupt committed log
+        # degrades per-WP to the coordination row (render, not crash) — the
+        # same degrade the lane read had.
+        try:
+            _st_row = _st_runtime_row(status_read_dir, wp_id)
+        except Exception:
+            if status_read_dir == st.feature_dir:
+                raise
+            _st_row = _st_runtime_row(st.feature_dir, wp_id)
+        row_lane = str(_st_row["lane"] or "")
+        if committed_dir is not None:
+            # The whole row is committed-sourced: a WP absent from the
+            # committed snapshot renders genesis — never the stale
+            # coordination lane beside committed companions, and never the
+            # non-display ``uninitialized`` sentinel.
+            lane_source = row_lane if row_lane and row_lane != Lane.UNINITIALIZED else str(Lane.GENESIS)
+        else:
+            lane_source = row_lane or str(Lane.GENESIS)
         lane = resolve_lane_alias(lane_source)
         st.work_packages.append(
             {
@@ -418,14 +439,11 @@ def _st_load_work_packages(st: _StatusState) -> None:
             }
         )
 
-    if not st.work_packages:
-        _tasks.console.print(f"[yellow]No work packages found in {st.tasks_dir}[/yellow]")
-        raise typer.Exit(0)
-
 
 def _st_apply_review_flags(st: _StatusState) -> None:
     """Phase C: annotate rows with stale-verdict + stalled-review warnings."""
     from specify_cli.cli.commands.agent import tasks as _tasks
+
     st.review_stall_threshold = _tasks._review_stall_threshold_minutes(st.main_repo_root)
     st.stale_verdicts, st.stalled_wps = _apply_review_status_flags(
         st.work_packages,
@@ -487,11 +505,10 @@ def _st_emit_json(st: _StatusState, ports: TasksPorts) -> None:
     print(ports.render.json_envelope(result))
 
 
-def _st_board_cell(
-    wp: Any, lane: Lane, main_repo_root: Path, profile_repo: ProfileLookup | None
-) -> str:
+def _st_board_cell(wp: Any, lane: Lane, main_repo_root: Path, profile_repo: ProfileLookup | None) -> str:
     """Build one kanban cell string (marker + stale/claimed/review decoration)."""
     from specify_cli.cli.commands.agent import tasks as _tasks
+
     title_truncated = wp["title"][:22] + "..." if len(wp["title"]) > 22 else wp["title"]
     marker = _tasks._get_hic_marker(wp.get("agent_profile"), main_repo_root, repo=profile_repo)
     display_id = f"{marker}{wp['id']}"
@@ -536,9 +553,7 @@ def _st_render_overview(ports: TasksPorts, st: _StatusState, view: StatusView) -
     ports.render.human("")
 
 
-def _st_render_board(
-    ports: TasksPorts, st: _StatusState, view: StatusView, profile_repo: ProfileLookup | None
-) -> None:
+def _st_render_board(ports: TasksPorts, st: _StatusState, view: StatusView, profile_repo: ProfileLookup | None) -> None:
     """Render the kanban board table via the Render port.
 
     Folds claimed + in_review WPs into the "Doing" column with markers; the row
@@ -621,11 +636,10 @@ def _st_render_arbiter(ports: TasksPorts, st: _StatusState) -> None:
         pass  # review package not yet available
 
 
-def _st_render_review_queues(
-    ports: TasksPorts, st: _StatusState, view: StatusView, profile_repo: ProfileLookup | None
-) -> None:
+def _st_render_review_queues(ports: TasksPorts, st: _StatusState, view: StatusView, profile_repo: ProfileLookup | None) -> None:
     """Render the for_review / approved / done-with-stale-verdict sections."""
     from specify_cli.cli.commands.agent import tasks as _tasks
+
     by_lane = view.lanes
     if by_lane[Lane.FOR_REVIEW]:
         ports.render.human("[bold cyan]👀 Ready for Review:[/bold cyan]")
@@ -650,10 +664,7 @@ def _st_render_review_queues(
         ports.render.human("[bold green]✅ Done (with stale verdict warnings):[/bold green]")
         for wp in done_stale:
             marker = _tasks._get_hic_marker(wp.get("agent_profile"), st.main_repo_root, repo=profile_repo)
-            ports.render.human(
-                f"  • {marker}{wp['id']} - {wp['title']}"
-                "  [bold yellow]⚠ review artifact: verdict=rejected[/bold yellow]"
-            )
+            ports.render.human(f"  • {marker}{wp['id']} - {wp['title']}  [bold yellow]⚠ review artifact: verdict=rejected[/bold yellow]")
         ports.render.human("")
 
 
@@ -666,6 +677,7 @@ def _st_render_active(
 ) -> None:
     """Render the claimed / in_progress / in_review sections via the Render port."""
     from specify_cli.cli.commands.agent import tasks as _tasks
+
     by_lane = view.lanes
     if by_lane[Lane.CLAIMED]:
         ports.render.human("[bold blue]🔄 Claimed (shown in Doing column):[/bold blue]")
@@ -707,11 +719,10 @@ def _st_render_active(
         ports.render.human("")
 
 
-def _st_render_planned(
-    ports: TasksPorts, st: _StatusState, view: StatusView, profile_repo: ProfileLookup | None
-) -> None:
+def _st_render_planned(ports: TasksPorts, st: _StatusState, view: StatusView, profile_repo: ProfileLookup | None) -> None:
     """Render the "Next Up (Planned)" section via the Render port."""
     from specify_cli.cli.commands.agent import tasks as _tasks
+
     by_lane = view.lanes
     if by_lane[Lane.PLANNED]:
         ports.render.human("[bold yellow]📋 Next Up (Planned):[/bold yellow]")
@@ -789,9 +800,7 @@ def _st_render_human(st: _StatusState, ports: TasksPorts) -> None:
     # tooling-friction.md), but it is a genuine, free win for the empty/
     # not-yet-started case that the removed bare ``AgentProfileRepository()``
     # construction paid unconditionally.
-    _needs_profile_lookup = any(
-        row.get("agent_profile") for rows in by_lane.values() for row in rows
-    )
+    _needs_profile_lookup = any(row.get("agent_profile") for rows in by_lane.values() for row in rows)
     if _needs_profile_lookup:
         try:
             # WP02 (charter-sole-door-bypass-closure-01KZ3WAA, FR-001): routed
@@ -820,9 +829,7 @@ def _st_render_human(st: _StatusState, ports: TasksPorts) -> None:
                 build_activation_aware_doctrine_service,
             )
 
-            profile_repo = build_activation_aware_doctrine_service(
-                st.main_repo_root
-            ).agent_profile_repository
+            profile_repo = build_activation_aware_doctrine_service(st.main_repo_root).agent_profile_repository
         except ImportError:
             # Genuinely-absent-module case only: ``charter`` is first-party
             # and ships in the same wheel, so this can only fire under a
@@ -866,7 +873,7 @@ def _do_status(
     order as the original single body: resolve → load → flag → render — so the
     WP05 byte-identical aggregation and the git/clock staleness sequence are intact.
     """
-    from specify_cli.cli.commands.agent import tasks as _tasks
+
     ports = ports or _default_status_ports()
     st = _StatusState(mission=mission, json_output=json_output, stale_threshold=stale_threshold)
     try:
@@ -876,11 +883,14 @@ def _do_status(
         if st.json_output:
             _st_emit_json(st, ports)
             return
+        if not st.work_packages:
+            ports.render.human(f"[yellow]No work packages found in {st.tasks_dir}[/yellow]")
+            return
         _st_render_human(st, ports)
     except typer.Exit:
         raise
     except Exception as e:
-        _tasks._output_error(json_output, str(e))
+        _status_error(json_output, str(e))
         raise typer.Exit(1) from None
 
 
@@ -966,9 +976,7 @@ def _get_hic_marker(
                 build_activation_aware_doctrine_service,
             )
 
-            profile_repo = build_activation_aware_doctrine_service(
-                repo_root
-            ).agent_profile_repository
+            profile_repo = build_activation_aware_doctrine_service(repo_root).agent_profile_repository
 
         profile = profile_repo.get(agent_profile)
         if profile and profile.sentinel:

@@ -623,6 +623,55 @@ def test_run_coordination_health_fix_end_to_end(
     )
 
 
+def test_mission_scoped_fix_does_not_backfill_another_mission(
+    fresh_mission_repo: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mission-scoped coordination fix must not mutate another mission."""
+    from specify_cli.cli.commands import _coordination_doctor as cd
+
+    selected_dir = fresh_mission_repo / "kitty-specs" / MISSION_SLUG
+    selected_meta = {
+        **_meta(),
+        "coordination_branch": "kitty/mission-never-created-00000000",
+    }
+    (selected_dir / "meta.json").write_text(json.dumps(selected_meta))
+
+    other_dir = fresh_mission_repo / "kitty-specs" / "unrelated-mission-01J6ZZ00"
+    other_dir.mkdir(parents=True)
+    other_meta_path = other_dir / "meta.json"
+    other_meta_path.write_text(
+        json.dumps(
+            {
+                "mission_slug": other_dir.name,
+                "mission_id": "01J6ZZ00ABCDEFGHJKMNPQRSTV",
+            }
+        )
+    )
+    before = other_meta_path.read_bytes()
+
+    monkeypatch.setattr(cd, "locate_project_root", lambda: fresh_mission_repo)
+
+    with pytest.raises(typer.Exit) as exc:
+        cd.run_coordination_health(
+            json_output=False,
+            fix=True,
+            mission=MISSION_SLUG,
+        )
+
+    assert exc.value.exit_code == 0
+    # Positive direction (#4544): the scoped mission's own topology must be
+    # re-derived. ``flatten_coordination_metadata`` pops ``topology`` so the
+    # backfill re-derives it; without this pin, deleting the backfill call
+    # entirely (not just unscoping it) leaves every test green while a
+    # flattened mission ends up with no stored ``topology`` at all.
+    fixed_meta = json.loads((selected_dir / "meta.json").read_text())
+    assert "topology" in fixed_meta, (
+        "the mission-scoped fix must re-derive the scoped mission's own "
+        "topology after the flatten pops it"
+    )
+    assert other_meta_path.read_bytes() == before
+
+
 def test_never_created_check_treats_remote_only_branch_as_present(
     fresh_mission_repo: Path,
 ) -> None:

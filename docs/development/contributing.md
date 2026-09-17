@@ -2,7 +2,7 @@
 title: Contributing to Spec Kitty
 description: The full contributor guide for Spec Kitty — developer setup, running tests, submitting pull requests, AI-assistance disclosure, and the release process.
 doc_status: active
-updated: '2026-09-14'
+updated: '2026-09-15'
 audience: docs/context/audience/internal/lead-developer.md
 type: how-to
 related:
@@ -27,7 +27,7 @@ Please note that this project is released with a [Contributor Code of Conduct](.
 
 You don't need to write code to help shape Spec Kitty. **Ideas, use-cases, and objections are genuinely wanted** — especially on design decisions still in flight.
 
-- **Look for the [`feedback-welcome`](https://github.com/Priivacy-ai/spec-kitty/labels/feedback-welcome) label.** Issues carrying it are open for community input; many contain an **Open decision** block calling out exactly where we'd like your perspective. Comment freely — a rough thought is more useful than silence.
+- **Look for the [`feedback-welcome`](https://github.com/spec-kitty/spec-kitty/labels/feedback-welcome) label.** Issues carrying it are open for community input; many contain an **Open decision** block calling out exactly where we'd like your perspective. Comment freely — a rough thought is more useful than silence.
 - **Filing something new?** Use the **💡 Idea / brainstorm / feedback** issue template (it auto-applies `feedback-welcome`), or the bug / enhancement templates for concrete reports. A partial sketch is fine — a maintainer will triage it and, if it's actionable, turn it into a tracked mission.
 - **No pressure to formalize.** You don't have to write a full proposal; tell us the problem you hit or the outcome you want, and we'll take it from there.
 
@@ -80,13 +80,14 @@ Supported contribution types are listed in the [emoji key](https://allcontributo
 
 ## Supported AI Agents
 
-Spec Kitty supports **12 AI coding agents**. When contributing features that affect slash commands, migrations, or templates, ensure changes apply to ALL agents:
+Spec Kitty supports **13 AI coding agents**. When contributing features that affect slash commands, migrations, or templates, ensure changes apply to ALL agents:
 
 - **Claude Code** (`.claude/commands/`)
 - **GitHub Copilot** (`.github/prompts/`)
 - **GitHub Codex** (`.codex/prompts/`)
 - **OpenCode** (`.opencode/command/`)
 - **Google Gemini** (`.gemini/commands/`)
+- **LLxprt Code** (`.llxprt/commands/`)
 - **Cursor** (`.cursor/commands/`)
 - **Windsurf** (`.windsurf/workflows/`)
 - **Qwen Code** (`.qwen/commands/`)
@@ -117,7 +118,7 @@ two `spec-kitty` binaries on your `PATH`.
 To install the latest `main` branch from GitHub with `uv`:
 
 ```bash
-uv tool install "spec-kitty-cli @ git+https://github.com/Priivacy-ai/spec-kitty.git@main"
+uv tool install "spec-kitty-cli @ git+https://github.com/spec-kitty/spec-kitty.git@main"
 uv tool update-shell
 # Open a new shell if uv changed your PATH, then verify:
 spec-kitty --version
@@ -126,7 +127,7 @@ spec-kitty --version
 To install the latest `main` branch from GitHub with `pipx`:
 
 ```bash
-pipx install "git+https://github.com/Priivacy-ai/spec-kitty.git@main"
+pipx install "git+https://github.com/spec-kitty/spec-kitty.git@main"
 pipx ensurepath
 # Open a new shell if pipx changed your PATH, then verify:
 spec-kitty --version
@@ -136,11 +137,11 @@ To update an existing GitHub-based global install to the latest `main` branch,
 force a reinstall through the same tool manager:
 
 ```bash
-uv tool install --force --upgrade "spec-kitty-cli @ git+https://github.com/Priivacy-ai/spec-kitty.git@main"
+uv tool install --force --upgrade "spec-kitty-cli @ git+https://github.com/spec-kitty/spec-kitty.git@main"
 ```
 
 ```bash
-pipx install --force "git+https://github.com/Priivacy-ai/spec-kitty.git@main"
+pipx install --force "git+https://github.com/spec-kitty/spec-kitty.git@main"
 ```
 
 For the latest PyPI release instead of GitHub `main`, install or upgrade by
@@ -212,7 +213,7 @@ before it is published to PyPI, avoid replacing your normal global
 For normal contributor work, run from a source checkout:
 
 ```bash
-git clone https://github.com/Priivacy-ai/spec-kitty.git
+git clone https://github.com/spec-kitty/spec-kitty.git
 cd spec-kitty
 
 # Latest main:
@@ -234,12 +235,12 @@ For a one-shot smoke test without cloning or installing a persistent tool, use
 ```bash
 # Latest main:
 SPEC_KITTY_NO_UPGRADE_CHECK=1 SPEC_KITTY_NO_NAG=1 \
-  uvx --isolated --from "git+https://github.com/Priivacy-ai/spec-kitty.git@main" \
+  uvx --isolated --from "git+https://github.com/spec-kitty/spec-kitty.git@main" \
   spec-kitty --version
 
 # Specific pull request:
 SPEC_KITTY_NO_UPGRADE_CHECK=1 SPEC_KITTY_NO_NAG=1 \
-  uvx --isolated --from "git+https://github.com/Priivacy-ai/spec-kitty.git@refs/pull/<PR_NUMBER>/head" \
+  uvx --isolated --from "git+https://github.com/spec-kitty/spec-kitty.git@refs/pull/<PR_NUMBER>/head" \
   spec-kitty --version
 ```
 
@@ -251,7 +252,7 @@ tmp="$(mktemp -d)"
 
 UV_TOOL_DIR="$tmp/tools" UV_TOOL_BIN_DIR="$tmp/bin" \
   uv tool install --force \
-  "spec-kitty-cli @ git+https://github.com/Priivacy-ai/spec-kitty.git@refs/pull/<PR_NUMBER>/head"
+  "spec-kitty-cli @ git+https://github.com/spec-kitty/spec-kitty.git@refs/pull/<PR_NUMBER>/head"
 
 SPEC_KITTY_NO_UPGRADE_CHECK=1 SPEC_KITTY_NO_NAG=1 \
   "$tmp/bin/spec-kitty" --version
@@ -405,14 +406,19 @@ control. Agents and humans move work by changing labels, never by out-of-band as
 As a contributor, two things follow:
 
 - **Issues** flow through a `status:*` lifecycle — `status:triage` → `status:ready` (the
-  fleet's admission queue) → `status:claimed` (an implementer VM holds a lease) →
-  `status:blocked`. **Never hand-set `status:claimed`**: it is a dispatcher-only lease, and a
-  hand-set claim poisons the queue (the dispatcher counts it as occupied capacity, so the
-  issue can sit invisible indefinitely).
+  fleet's admission queue) → `status:claimed` (an implementer holds a lease) →
+  `status:blocked`. A human-driven contributor may claim work by adding `status:claimed`
+  and `taken-by-human` while beginning it, then commenting
+  `claimed by <harness>/<model> on <machine>`; never add a bare claim when nobody is actively
+  working the issue, because the dispatcher treats the label as occupied capacity.
+  `taken-by-human` is the load-bearing half of that pair: it is the only label that keeps the
+  fleet's PR-routed fix and recovery lanes off your PR (they read the PR's own labels, never the
+  linked issue's `status:claimed`), so a claim without it can still collide with a fleet VM.
 - **Pull requests** flow through their own lane labels — `ready-for-squad` (request
   adversarial review) → `squad:running` → `squad:passed` / `squad:majors` — plus
   `needs:implementer`, which is **mandatory on any fix/rebase request that expects a new
-  push** (the dispatcher only sees fix requests carrying that label).
+  push**. The dispatcher admits fix rounds carrying `needs:implementer` **or**
+  `squad:majors`; a request comment carrying neither label is never seen.
 
 The full label tables, the dispatcher admission/reaping loop, and the source control files
 are documented in
@@ -478,6 +484,10 @@ unset GITHUB_TOKEN && gh run watch <run-id>
 # 5. Verify
 unset GITHUB_TOKEN && gh release view vX.Y.Z
 pipx install --force spec-kitty-cli==X.Y.Z
+
+# 6. Open the next development cycle on main (Release Checklist, step 8)
+#    PR: next version in pyproject.toml, the uv.lock project entry and
+#    .kittify/metadata.yaml, plus a new "## [Unreleased] - <next version>" heading
 ```
 
 ### Full Release (Minor/Major)
@@ -545,11 +555,15 @@ For larger releases with multiple changes:
    pipx install --force spec-kitty-cli==X.Y.Z
    ```
 
-9. **Clean up**
-   ```bash
-   git branch -d release/X.Y.Z
-   git push origin --delete release/X.Y.Z
-   ```
+9. **Open the next development cycle**
+   - Right after the tag, open a pull request that moves `main` to the next development or candidate version: `pyproject.toml`, the project entry in `uv.lock`, `.kittify/metadata.yaml`, and a new `## [Unreleased] - <next version>` heading in `CHANGELOG.md`.
+   - Until it merges, branch-mode release validation on `main` fails with "Version does not advance beyond latest tag". The canonical step is step 8 of the [Release Checklist](../../RELEASE_CHECKLIST.md).
+
+10. **Clean up**
+    ```bash
+    git branch -d release/X.Y.Z
+    git push origin --delete release/X.Y.Z
+    ```
 
 ### What the Release Workflow Does
 
@@ -576,6 +590,8 @@ Before tagging a release, ensure:
 - [ ] CHANGELOG.md is updated with emoji category headings
 - [ ] Tests pass locally: `pytest tests/`
 - [ ] Broad CI, release readiness, and shared-package drift checks are green
+
+After tagging, open the next development cycle on `main` (Full Release step 9).
 
 ### Important Notes
 

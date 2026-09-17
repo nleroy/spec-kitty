@@ -47,6 +47,7 @@ from specify_cli.cli.console import err_console
 from kernel._safe_re import re
 from kernel.paths import repo_tree_path
 from mission_runtime import ActionContextError, MissionArtifactKind
+from specify_cli.core.checkout_identity import CheckoutIdentity, Intent, resolve_checkout_identity
 from specify_cli.core.commit_guard import GuardCapability
 from specify_cli.core.constants import KITTY_SPECS_DIR
 from specify_cli.core.dependency_graph import detect_cycles, validate_dependencies
@@ -195,6 +196,9 @@ def _bootstrap_canonical_state_via_mission(
             capability=capability or GuardCapability.STANDARD,
             repo_root=owned.primary,
             effective_root=owned.root,
+            # #3866: thread the validated value object so the per-WP seed
+            # loop does not re-run resolve_owned_mission for every WP.
+            owned_mission=owned,
         )
     if capability is None:
         return _mission.bootstrap_canonical_state(planning_dir, mission_slug, dry_run=dry_run)
@@ -623,11 +627,26 @@ def _persist_recovered_pr_bound_contract(
     return True
 
 
-def _enforce_branch_contract_write_ownership(primary_dir: Path, *, json_output: bool) -> None:
-    """Refuse branch-contract writes from a checkout that does not own the mission."""
+def _enforce_branch_contract_write_ownership(
+    primary_dir: Path,
+    *,
+    invocation_identity: CheckoutIdentity,
+    json_output: bool,
+) -> None:
+    """Refuse branch-contract writes from a checkout that does not own the mission.
+
+    #3786: the invoking checkout arrives as an injected :class:`CheckoutIdentity`
+    value object, resolved ONCE at the ``finalize_tasks`` entrypoint (the single
+    boundary that legitimately reads ambient state) — this guard never reads
+    ``Path.cwd()`` itself. ``invocation_identity.invoking_root`` is the honest
+    ambient anchor: the lane worktree itself for a linked worktree, the checkout
+    root for an owner invocation — the same root ``get_status_read_root`` yields
+    for every linked-worktree/own-root topology, so #812's repository-anchored
+    ownership comparison is unchanged for those topologies.
+    """
     target_owner = get_status_read_root(primary_dir).resolve()
     target_repository = get_main_repo_root(target_owner).resolve()
-    ambient_checkout = get_status_read_root(Path.cwd()).resolve()
+    ambient_checkout = invocation_identity.invoking_root.resolve()
     ambient_repository = get_main_repo_root(ambient_checkout).resolve()
     invoking_checkout = ambient_checkout if ambient_repository == target_repository else target_owner
     if invoking_checkout == target_owner:
@@ -656,13 +675,18 @@ def _persist_branch_contract_for_finalize(
     planning_branch: str,
     merge_target_branch: str,
     target_branch_override: str | None,
+    invocation_identity: CheckoutIdentity,
     json_output: bool,
 ) -> TargetBranchPersistOutcome:
     """Persist an explicit branch repair atomically and only from its owner."""
     original_target = (load_meta_fail_closed(primary_dir) or {}).get("target_branch")
     needs_write = bool(target_branch_override and target_branch_override.strip() and original_target != planning_branch)
     if needs_write:
-        _enforce_branch_contract_write_ownership(primary_dir, json_output=json_output)
+        _enforce_branch_contract_write_ownership(
+            primary_dir,
+            invocation_identity=invocation_identity,
+            json_output=json_output,
+        )
     recovered = _persist_recovered_pr_bound_contract(
         primary_dir,
         planning_branch=planning_branch,
@@ -3107,6 +3131,12 @@ def finalize_tasks(  # noqa: C901 -- ordered fail-closed gates plus owned-checko
     meta_path_for_revert: Path | None = None
     meta_original_text: str | None = None
     try:
+        # #3786: the ONE ambient identity read for this command — resolved here,
+        # at the entrypoint boundary, and injected into the write-ownership
+        # guard below. Nothing below this point reads ``Path.cwd()`` for
+        # identity: ``_enforce_branch_contract_write_ownership`` consumes the
+        # injected value object instead of re-reading the ambient checkout.
+        invocation_identity = resolve_checkout_identity(Path.cwd(), Intent.WRITE)
         repo_root = _resolve_repo_root(json_output)
         owned = None
         if owned_checkout is not None:
@@ -3169,6 +3199,7 @@ def finalize_tasks(  # noqa: C901 -- ordered fail-closed gates plus owned-checko
                 planning_branch=target_branch,
                 merge_target_branch=merge_target_branch,
                 target_branch_override=target_branch_override,
+                invocation_identity=invocation_identity,
                 json_output=json_output,
             )
         meta_json_persisted = target_branch_persist.persisted

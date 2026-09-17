@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from dataclasses import replace
@@ -14,7 +13,7 @@ import click
 import typer
 from rich.align import Align
 from rich.text import Text
-from typer.core import TyperGroup
+from typer.core import TyperCommand, TyperGroup, TyperOption
 
 # Deferred (TYPE_CHECKING + function-local in git_resolution_failure_message):
 # charter.resolution's module-level import chain (jsonschema/rfc3987) is the
@@ -26,6 +25,7 @@ if TYPE_CHECKING:
     from charter.resolution import GitCommonDirUnavailableError, NotInsideRepositoryError
 
 from specify_cli.cli.console import CliConsole, console
+from specify_cli.cli.json_contract import json_error
 from specify_cli.core.config import BANNER
 from specify_cli.core.env import is_truthy
 from specify_cli.core.project_resolver import locate_project_root
@@ -107,6 +107,113 @@ class BannerGroup(TyperGroup):
         super().format_help(ctx, formatter)
 
 
+# ---------------------------------------------------------------------------
+# Mission-agnostic ``--mission`` accept-and-ignore (#3953)
+# ---------------------------------------------------------------------------
+
+_MISSION_OPTION_NAME = "--mission"
+
+
+def _ignored_mission_option() -> TyperOption:
+    """The hidden, non-exposed ``--mission`` option appended to mission-agnostic commands.
+
+    Built from :class:`typer.core.TyperOption` — typer's own option class —
+    and never a bare ``click.Option``: wheel installs resolve any typer in
+    the declared ``>=0.24.1,<0.28`` range, and the 0.26+/0.27 era vendors its
+    own click (``typer._click``) whose parser shares no classes with the
+    real ``click`` package. A real-click ``Option`` injected into a
+    vendored-click command crashes every invocation with
+    ``'Context' object has no attribute '_param_default_explicit'``
+    (found by ``tests/architectural/test_remediation_effectiveness.py``
+    against its wheel-install venv, typer 0.27.2 + click 8.5.0).
+    ``TyperOption`` is the one option class guaranteed to live in the same
+    click universe as ``TyperCommand`` in both eras, and takes the same
+    click-style keyword arguments.
+    """
+    return TyperOption(
+        param_decls=[_MISSION_OPTION_NAME],
+        expose_value=False,
+        hidden=True,
+        help="Accepted and ignored: this command is not mission-scoped.",
+    )
+
+
+def _with_ignored_mission_option(params: list[click.Parameter]) -> list[click.Parameter]:
+    """Append the ignored ``--mission`` option unless ``params`` already declares one."""
+    if any(_MISSION_OPTION_NAME in param.opts for param in params):
+        return params
+    return [*params, _ignored_mission_option()]
+
+
+class MissionAgnosticCommand(TyperCommand):
+    """Leaf command class that accepts-and-ignores ``--mission``.
+
+    The shipped mission-step skill text (``packs/built-in/missions/
+    mission-steps/**/prompt.md``) instructs agents to pass
+    ``--mission <handle>`` to *every* spec-kitty command in multi-mission
+    repos. Mission-scoped commands declare a real ``--mission`` option;
+    mission-agnostic ones (``agent profile list`` and the like) rejected it
+    with ``No such option: --mission``, so the instruction was contradicted
+    by the CLI once per session (#3953). Appending a hidden, non-exposed
+    ``--mission`` option here makes those commands accept and ignore the
+    flag: the value parses and is discarded, the callback never sees it,
+    and ``--help`` stays unchanged. Commands that declare their own
+    ``--mission`` — matched by option name, not parameter name, since
+    several declare it behind a ``feature`` parameter — are untouched.
+    """
+
+    def get_params(self, ctx: click.Context) -> list[click.Parameter]:
+        return _with_ignored_mission_option(super().get_params(ctx))
+
+
+class MissionAgnosticGroup(TyperGroup):
+    """Group form of :class:`MissionAgnosticCommand` for sub-apps used as leaf commands.
+
+    A sub-app registered via ``add_typer`` whose callback owns the options and
+    which registers no commands (``charter list``) is a leaf surface at click
+    level — its group object is what parses the options, so the ignored
+    ``--mission`` rides on the group class.
+    """
+
+    def get_params(self, ctx: click.Context) -> list[click.Parameter]:
+        return _with_ignored_mission_option(super().get_params(ctx))
+
+
+def make_leaf_commands_mission_agnostic(app: typer.Typer) -> int:
+    """Point every registered leaf command's click class at the mission-agnostic classes.
+
+    Two leaf shapes exist. A registered command (``@app.command``) becomes a
+    click Command and is retargeted to :class:`MissionAgnosticCommand`. A
+    sub-app registered via ``add_typer`` that declares no commands of its own
+    (callback-owned options, e.g. ``charter list``) is a leaf *group* and is
+    retargeted to :class:`MissionAgnosticGroup`; anything else is a real
+    group and is recursed into.
+
+    Commands already carrying a custom click class are left alone — that
+    class was chosen deliberately — and both mission-agnostic classes
+    no-op for commands that declare a real ``--mission``. Idempotent.
+    Returns the number of leaf commands retargeted.
+    """
+    retargeted = 0
+    for info in app.registered_commands:
+        if info.cls is None or info.cls is TyperCommand:
+            info.cls = MissionAgnosticCommand
+            retargeted += 1
+    for group_info in app.registered_groups:
+        sub = group_info.typer_instance
+        if sub is None:
+            continue
+        if not sub.registered_commands and not sub.registered_groups:
+            # ``info.cls`` defaults to a DefaultPlaceholder wrapping None.
+            cls = getattr(sub.info.cls, "value", sub.info.cls)
+            if cls is None or cls is TyperGroup:
+                sub.info.cls = MissionAgnosticGroup
+                retargeted += 1
+        else:
+            retargeted += make_leaf_commands_mission_agnostic(sub)
+    return retargeted
+
+
 def _should_use_simple_help() -> bool:
     """Choose a plain help renderer for narrow terminals or explicit opt-in."""
     raw = os.environ.get("SPEC_KITTY_SIMPLE_HELP", "").strip().lower()
@@ -114,7 +221,7 @@ def _should_use_simple_help() -> bool:
         return True
     if raw in {"0", "false", "no", "off"}:
         return False
-    return console.width < 100
+    return bool(console.width < 100)
 
 
 def _format_simple_help(group: TyperGroup, ctx: click.Context, formatter: click.HelpFormatter) -> None:
@@ -316,10 +423,16 @@ def callback(ctx: typer.Context) -> None:
         pass
 
 
-def get_project_root_or_exit(start: Path | None = None) -> Path:
-    """Return the project root or exit when .kittify cannot be located."""
-    project_root = locate_project_root(start)
+def get_project_root_or_exit(start: Path | None = None, *, json_output: bool = False) -> Path:
+    """Return the project root or exit 1, optionally emitting the JSON error contract.
+
+    Existing callers retain their human-readable diagnostics unless they opt in.
+    """
+    project_root: Path | None = locate_project_root(start)
     if project_root is None:
+        if json_output:
+            console.emit_json(json_error("not_in_project", "Unable to locate the Spec Kitty project root (.kittify directory not found)."))
+            raise typer.Exit(1)
         console.print("[red]Error:[/red] Unable to locate the Spec Kitty project root (.kittify directory not found).")
         console.print("[dim]Run this command from the project root or from a feature worktree under .worktrees/<feature>/.[/dim]")
         console.print("[dim]Tip: Initialize a project with 'spec-kitty init <name>' if one does not exist.[/dim]")
@@ -364,7 +477,7 @@ def exit_git_resolution_failure(
     """
     message = git_resolution_failure_message(exc, project_root)
     if json_output:
-        typer.echo(json.dumps({"error": "git_resolution_failed", "message": message}), err=True)
+        console.emit_json(json_error("git_resolution_failed", message))
     else:
         console.print(f"[red]Error:[/red] {message}")
     raise typer.Exit(1) from exc
